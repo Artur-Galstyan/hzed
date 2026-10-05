@@ -95,16 +95,40 @@ Some key features provided by language servers include:
 
 ### Managing Language Servers
 
-Zed simplifies language server management for users:
+Zed uses a language server from your PATH or an existing local installation when possible. It does not check for or download language server binaries by default. Install extensions yourself from the Extensions panel ({#kb zed::Extensions}); Zed does not install them on startup.
 
-1. Automatic Download: When you open a file with a matching file type, Zed automatically downloads the appropriate language server. Zed may prompt you to install an extension for known file types.
+To allow Zed to check for and download one language server, open the Settings Editor (`Cmd+,` on macOS or `Ctrl+,` on Linux) and search for `lsp`. Or add this to your settings.json:
 
-2. Storage Location:
+```json [settings]
+{
+  "lsp": {
+    "rust-analyzer": {
+      "fetch": { "allow_binary_download": true }
+    }
+  }
+}
+```
 
-   - macOS: `~/Library/Application Support/Zed/languages`
-   - Linux: `$XDG_DATA_HOME/zed/languages`, `$FLATPAK_XDG_DATA_HOME/zed/languages`, or `$HOME/.local/share/zed/languages`
+The opt-in also allows update checks for that server when it starts. It does not grant permission to download other language servers. `binary.ignore_system_version` controls PATH lookup, not downloads; existing `true` values do not grant download permission. To use a specific installed binary instead, set `lsp.<server>.binary.path`.
 
-3. Automatic Updates: Zed keeps your language servers up-to-date, ensuring you always have the latest features and improvements.
+Servers installed by Zed are stored at:
+
+- macOS: `~/Library/Application Support/Zed/languages`
+- Linux: `$XDG_DATA_HOME/zed/languages`, `$FLATPAK_XDG_DATA_HOME/zed/languages`, or `$HOME/.local/share/zed/languages`
+
+Some extensions need GitHub release metadata before they can find a cached binary. GLSL falls back to its cached binary without a network check, but other servers may not start without the opt-in. Set `lsp.<server>.binary.path` to use their installed binary offline.
+
+Node-based servers use Node from PATH, `node.path`, or a valid cached Zed-managed Node installation. If none is available, allow Zed to download Node separately. Open the Settings Editor and search for `node`, or add this to your settings.json:
+
+```json [settings]
+{
+  "node": {
+    "allow_binary_download": true
+  }
+}
+```
+
+`node.ignore_system_version: true` disables PATH lookup, even if Node is installed. Older settings with this value do not enable downloads. Zed reuses a valid cached managed Node installation; otherwise set `node.path` or opt in with `node.allow_binary_download: true`. Remote hosts use their own `node.allow_binary_download` setting. Node permission alone does not allow language server downloads.
 
 ### Choosing Language Servers
 
@@ -263,14 +287,13 @@ Most of the servers would rely on this way of configuring only.
 
 Apart from the LSP-related server configuration options, certain servers in Zed allow configuring the way binary is launched by Zed.
 
-Language servers are automatically downloaded or launched if found in your path, if you wish to specify an explicit alternate binary you can specify that in settings:
+To use a specific binary instead of a server from PATH or Zed's local cache, set its path in settings.json:
 
 ```json [settings]
+{
   "lsp": {
     "rust-analyzer": {
       "binary": {
-        // Whether to fetch the binary from the internet, or attempt to find locally.
-        "ignore_system_version": false,
         "path": "/path/to/langserver/bin",
         "arguments": ["--option", "value"],
         "env": {
@@ -279,6 +302,7 @@ Language servers are automatically downloaded or launched if found in your path,
       }
     }
   }
+}
 ```
 
 ### Enabling or Disabling Language Servers
@@ -322,6 +346,18 @@ Zed supports both built-in and external formatters. See [`formatter`](./referenc
 ```
 
 This example uses Prettier for JavaScript and the language server's formatter for [Rust](./languages/rust.md), both set to format on save.
+
+Zed's built-in Prettier integration (`"formatter": "prettier"` or `"auto"`) uses project-local Prettier or a cached managed copy without downloading packages. `prettier.allowed` enables formatting, not npm installs. To allow Zed to install the default Prettier and its plugins for one language, set `prettier.allow_package_install` for that language:
+
+```json [settings]
+"languages": {
+  "JavaScript": {
+    "prettier": { "allow_package_install": true }
+  }
+}
+```
+
+The opt-in permits npm requests when a JavaScript buffer needs Prettier. You can instead install Prettier in the project yourself. `node.allow_binary_download` controls Node downloads, not npm package installs. Without the opt-in or an existing Prettier installation, the built-in formatter skips Prettier.
 
 To disable formatting for a specific language:
 

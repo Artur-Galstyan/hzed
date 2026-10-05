@@ -458,7 +458,7 @@ impl LlamaCppLanguageModelProvider {
     ) -> Self {
         let capability_cells: CapabilityCells = Arc::new(RwLock::new(HashMap::default()));
         let loading_progress: LoadingProgress = Arc::new(RwLock::new(HashMap::default()));
-        let this = Self {
+        Self {
             http_client: http_client.clone(),
             capability_cells: capability_cells.clone(),
             loading_progress: loading_progress.clone(),
@@ -505,11 +505,7 @@ impl LlamaCppLanguageModelProvider {
                     credentials_provider,
                 }
             }),
-        };
-        // Discover eagerly so a running server is picked up without opening settings.
-        this.state
-            .update(cx, |state, cx| state.restart_fetch_models_task(cx));
-        this
+        }
     }
 
     fn settings(cx: &App) -> &LlamaCppSettings {
@@ -1895,12 +1891,7 @@ mod tests {
 
                     if path == "/v1/models" {
                         model_request_authorizations.lock().push(authorization);
-                        let request_index = model_request_count.fetch_add(1, Ordering::SeqCst);
-                        if request_index == 0 {
-                            return Ok(http_client::Response::builder()
-                                .status(503)
-                                .body(http_client::AsyncBody::from("not ready"))?);
-                        }
+                        model_request_count.fetch_add(1, Ordering::SeqCst);
 
                         return Ok(http_client::Response::builder().status(200).body(
                             http_client::AsyncBody::from(
@@ -1928,6 +1919,7 @@ mod tests {
             .update(|cx| LlamaCppLanguageModelProvider::new(http_client, credentials_provider, cx));
 
         cx.run_until_parked();
+        assert_eq!(model_request_count.load(Ordering::SeqCst), 0);
 
         let result = cx.update(|cx| provider.authenticate(cx)).await;
         assert!(
@@ -1936,7 +1928,7 @@ mod tests {
         );
         assert_eq!(
             &*model_request_authorizations.lock(),
-            &[None, Some("Bearer loaded-key".to_string())]
+            &[Some("Bearer loaded-key".to_string())]
         );
     }
 }

@@ -276,6 +276,9 @@ pub struct PrettierSettings {
     /// Enables or disables formatting with Prettier for a given language.
     pub allowed: bool,
 
+    /// Allows npm to install default Prettier and its plugins for this language.
+    pub allow_package_install: bool,
+
     /// Forces Prettier integration to use a specific parser name when formatting files with the language.
     pub parser: Option<String>,
 
@@ -860,6 +863,7 @@ impl settings::Settings for AllLanguageSettings {
                 formatter: settings.formatter.unwrap(),
                 prettier: PrettierSettings {
                     allowed: prettier.allowed.unwrap(),
+                    allow_package_install: prettier.allow_package_install.unwrap_or(false),
                     parser: prettier.parser.filter(|parser| !parser.is_empty()),
                     plugins: prettier.plugins.unwrap_or_default(),
                     options: prettier.options.unwrap_or_default(),

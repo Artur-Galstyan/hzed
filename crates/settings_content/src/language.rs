@@ -1069,6 +1069,10 @@ pub struct PrettierSettingsContent {
     /// Enables or disables formatting with Prettier for a given language.
     pub allowed: Option<bool>,
 
+    /// Allows Zed to install default Prettier and its plugins with npm for this language.
+    /// Disabled by default; project-local and cached Prettier do not need this permission.
+    pub allow_package_install: Option<bool>,
+
     /// Forces Prettier integration to use a specific parser name when formatting files with the language.
     pub parser: Option<String>,
 
@@ -1718,7 +1722,8 @@ mod test {
 
     #[test]
     fn test_prettier_options() {
-        let raw_prettier = r#"{"allowed": false, "tabWidth": 4, "semi": false}"#;
+        let raw_prettier =
+            r#"{"allowed": true, "allow_package_install": true, "tabWidth": 4, "semi": false}"#;
         let result = serde_json::from_str::<PrettierSettingsContent>(raw_prettier)
             .expect("Failed to parse prettier options");
         assert!(
@@ -1735,5 +1740,16 @@ mod test {
                 .expect("options were flattened")
                 .contains_key("tabWidth")
         );
+        assert_eq!(result.allow_package_install, Some(true));
+        assert!(
+            !result
+                .options
+                .as_ref()
+                .expect("options were flattened")
+                .contains_key("allow_package_install")
+        );
+        let default = serde_json::from_str::<PrettierSettingsContent>(r#"{"allowed": true}"#)
+            .expect("parse default Prettier permission");
+        assert!(!default.allow_package_install.unwrap_or(false));
     }
 }

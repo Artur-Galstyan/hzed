@@ -7,6 +7,24 @@ struct GlslExtension {
 }
 
 impl GlslExtension {
+    fn cached_binary_on_disk() -> Option<String> {
+        fs::read_dir(".")
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("glsl_analyzer-")
+                {
+                    return None;
+                }
+                let path = entry.path().join("bin/glsl_analyzer");
+                path.is_file().then(|| path.to_string_lossy().into_owned())
+            })
+            .max()
+    }
+
     fn language_server_binary_path(
         &mut self,
         language_server_id: &LanguageServerId,
@@ -26,13 +44,22 @@ impl GlslExtension {
             language_server_id,
             &zed::LanguageServerInstallationStatus::CheckingForUpdate,
         );
-        let release = zed::latest_github_release(
+        let release = match zed::latest_github_release(
             "nolanderc/glsl_analyzer",
             zed::GithubReleaseOptions {
                 require_assets: true,
                 pre_release: false,
             },
-        )?;
+        ) {
+            Ok(release) => release,
+            Err(error) => {
+                if let Some(path) = Self::cached_binary_on_disk() {
+                    self.cached_binary_path = Some(path.clone());
+                    return Ok(path);
+                }
+                return Err(error);
+            }
+        };
 
         let (platform, arch) = zed::current_platform();
         let asset_name = format!(

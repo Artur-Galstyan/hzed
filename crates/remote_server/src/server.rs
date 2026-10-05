@@ -28,8 +28,7 @@ use net::async_net::{UnixListener, UnixStream};
 use node_runtime::{NodeBinaryOptions, NodeRuntime};
 use paths::logs_dir;
 use project::{project_settings::ProjectSettings, trusted_worktrees};
-use proto::CrashReport;
-use release_channel::{AppCommitSha, AppVersion, RELEASE_CHANNEL, ReleaseChannel};
+use release_channel::{AppCommitSha, AppVersion, RELEASE_CHANNEL};
 use remote::{
     RemoteClient,
     json_log::LogRecord,
@@ -37,11 +36,10 @@ use remote::{
     proxy::ProxyLaunchError,
 };
 use reqwest_client::ReqwestClient;
+use rpc::AnyProtoClient;
 use rpc::proto::{self, Envelope, REMOTE_SERVER_PROJECT_ID};
-use rpc::{AnyProtoClient, TypedEnvelope};
 use settings::{Settings, SettingsStore, watch_config_file};
 use smol::{
-    Timer,
     channel::{Receiver, Sender},
     io::AsyncReadExt,
     stream::StreamExt as _,
@@ -53,7 +51,7 @@ use std::{
     mem,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, LazyLock},
+    sync::Arc,
     time::Instant,
 };
 use thiserror::Error;
@@ -125,19 +123,6 @@ pub fn run(command: Commands) -> anyhow::Result<()> {
         }
     }
 }
-
-pub static VERSION: LazyLock<String> = LazyLock::new(|| match *RELEASE_CHANNEL {
-    ReleaseChannel::Stable | ReleaseChannel::Preview => env!("ZED_PKG_VERSION").to_owned(),
-    ReleaseChannel::Nightly | ReleaseChannel::Dev => {
-        let commit_sha = option_env!("ZED_COMMIT_SHA").unwrap_or("missing-zed-commit-sha");
-        let build_identifier = option_env!("ZED_BUILD_ID");
-        if let Some(build_id) = build_identifier {
-            format!("{build_id}+{commit_sha}")
-        } else {
-            commit_sha.to_owned()
-        }
-    }
-});
 
 fn init_logging_proxy() {
     env_logger::builder()
@@ -299,87 +284,6 @@ fn init_logging_server(log_file_path: &Path) -> Result<Receiver<Vec<u8>>> {
         .init();
 
     Ok(rx)
-}
-
-/// Initializes the telemetry queue on the remote server, forwarding every
-/// emitted event to the connected client over the proto channel.
-///
-/// The remote server cannot upload telemetry itself (it has no logged-in user,
-/// no checksum seed, and no Telemetry instance), so without this its
-/// `telemetry::event!` calls are silently dropped. The client attributes these
-/// events to the remote host using the platform it already detected during
-/// connection setup, so no OS metadata needs to be sent here.
-fn init_telemetry_forwarding(session: AnyProtoClient, cx: &mut App) {
-    let (tx, mut rx) = mpsc::unbounded::<telemetry::Event>();
-    telemetry::init(tx);
-
-    cx.background_spawn(async move {
-        while let Some(event) = rx.next().await {
-            let Some(event_json) = serde_json::to_string(&event).log_err() else {
-                continue;
-            };
-            session
-                .send(proto::TelemetryEvent {
-                    project_id: REMOTE_SERVER_PROJECT_ID,
-                    event_json,
-                })
-                .log_err();
-        }
-    })
-    .detach();
-}
-
-fn handle_crash_files_requests(project: &Entity<HeadlessProject>, client: &AnyProtoClient) {
-    client.add_request_handler(
-        project.downgrade(),
-        |_, _: TypedEnvelope<proto::GetCrashFiles>, _cx| async move {
-            let mut legacy_panics = Vec::new();
-            let mut crashes = Vec::new();
-            let mut children = smol::fs::read_dir(paths::logs_dir()).await?;
-            while let Some(child) = children.next().await {
-                let child = child?;
-                let child_path = child.path();
-
-                let extension = child_path.extension();
-                if extension == Some(OsStr::new("panic")) {
-                    let filename = if let Some(filename) = child_path.file_name() {
-                        filename.to_string_lossy()
-                    } else {
-                        continue;
-                    };
-
-                    if !filename.starts_with("zed") {
-                        continue;
-                    }
-
-                    let file_contents = smol::fs::read_to_string(&child_path)
-                        .await
-                        .context("error reading panic file")?;
-
-                    legacy_panics.push(file_contents);
-                    smol::fs::remove_file(&child_path)
-                        .await
-                        .context("error removing panic")
-                        .log_err();
-                } else if extension == Some(OsStr::new("dmp")) {
-                    let mut json_path = child_path.clone();
-                    json_path.set_extension("json");
-                    if let Ok(json_content) = smol::fs::read_to_string(&json_path).await {
-                        crashes.push(CrashReport {
-                            metadata: json_content,
-                            minidump_contents: smol::fs::read(&child_path).await?,
-                        });
-                        smol::fs::remove_file(&child_path).await.log_err();
-                        smol::fs::remove_file(&json_path).await.log_err();
-                    } else {
-                        log::error!("Couldn't find json metadata for crash: {child_path:?}");
-                    }
-                }
-            }
-
-            anyhow::Ok(proto::GetCrashFilesResponse { crashes })
-        },
-    );
 }
 
 struct ServerListeners {
@@ -565,34 +469,7 @@ pub fn execute_run(
     let startup_time = Instant::now();
     let app = gpui_platform::headless();
     let pid = std::process::id();
-    let id = pid.to_string();
-    let should_install_crash_handler =
-        client::telemetry::should_install_crash_handler(*RELEASE_CHANNEL);
-
-    let crash_handler = if should_install_crash_handler {
-        Some(app.background_executor().spawn(crashes::init(
-            crashes::InitCrashHandler {
-                session_id: id,
-                zed_version: VERSION.to_owned(),
-                binary: "zed-remote-server".to_string(),
-                release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
-                commit_sha: option_env!("ZED_COMMIT_SHA").unwrap_or("no_sha").to_owned(),
-            },
-            {
-                let background_executor = app.background_executor();
-                move |task| {
-                    background_executor.spawn(task).detach();
-                }
-            },
-            |pid| paths::temp_dir().join(format!("zed-remote-server-crash-handler-{pid}")),
-            // we are running outside gpui
-            #[allow(clippy::disallowed_methods)]
-            |duration| FutureExt::map(Timer::after(duration), |_| ()),
-        )))
-    } else {
-        crashes::force_backtrace();
-        None
-    };
+    crashes::force_backtrace();
     let log_rx = init_logging_server(&log_file)?;
     log::info!(
         "starting up with PID {}:\npid_file: {:?}, log_file: {:?}, stdin_socket: {:?}, stdout_socket: {:?}, stderr_socket: {:?}",
@@ -632,13 +509,6 @@ pub fn execute_run(
 
     let git_hosting_provider_registry = Arc::new(GitHostingProviderRegistry::new());
     let run = move |cx: &mut App| {
-        if let Some(crash_handler) = crash_handler {
-            cx.spawn(async move |_cx| {
-                let _crash_handler = crash_handler.await;
-                // cx.update(|cx| cx.set_global(CrashHandler(crash_handler)))
-            })
-            .detach();
-        }
         settings::init(cx);
         let app_commit_sha = option_env!("ZED_COMMIT_SHA").map(|s| AppCommitSha::new(s.to_owned()));
         let app_version = AppVersion::load(
@@ -660,7 +530,6 @@ pub fn execute_run(
 
         log::info!("gpui app started, initializing server");
         let session = start_server(listeners, log_rx, cx, is_wsl_interop);
-        init_telemetry_forwarding(session.clone(), cx);
         trusted_worktrees::init(HashMap::default(), cx);
 
         GitHostingProviderRegistry::set_global(git_hosting_provider_registry, cx);
@@ -715,8 +584,6 @@ pub fn execute_run(
                 cx,
             )
         });
-
-        handle_crash_files_requests(&project, &session);
 
         cx.background_spawn(async move {
             cleanup_old_binaries_wsl();
@@ -843,29 +710,7 @@ pub(crate) fn execute_proxy(
 
     let server_paths = ServerPaths::new(&identifier)?;
 
-    let id = std::process::id().to_string();
-    let should_install_crash_handler =
-        client::telemetry::should_install_crash_handler(*RELEASE_CHANNEL);
-
-    if should_install_crash_handler {
-        smol::spawn(crashes::init(
-            crashes::InitCrashHandler {
-                session_id: id,
-                zed_version: VERSION.to_owned(),
-                binary: "zed-remote-proxy".to_string(),
-                release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
-                commit_sha: option_env!("ZED_COMMIT_SHA").unwrap_or("no_sha").to_owned(),
-            },
-            |task| {
-                smol::spawn(task).detach();
-            },
-            |pid| paths::temp_dir().join(format!("zed-remote-server-proxy-crash-handler-{pid}")),
-            // we are running outside gpui
-            #[allow(clippy::disallowed_methods)]
-            |duration| FutureExt::map(Timer::after(duration), |_| ()),
-        ))
-        .detach();
-    };
+    crashes::force_backtrace();
     log::info!("starting proxy process. PID: {}", std::process::id());
     let server_pid = {
         let server_pid = check_pid_file(&server_paths.pid_file).map_err(|source| {
@@ -1239,8 +1084,7 @@ fn initialize_settings(
             log::info!("Got new node settings: {new_node_settings:?}");
             let options = NodeBinaryOptions {
                 allow_path_lookup: !new_node_settings.ignore_system_version,
-                // TODO: Implement this setting
-                allow_binary_download: true,
+                allow_binary_download: new_node_settings.allow_binary_download,
                 use_paths: new_node_settings.path.as_ref().map(|node_path| {
                     let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
                     let npm_path = new_node_settings

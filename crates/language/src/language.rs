@@ -852,13 +852,6 @@ where
                 return (Ok(cached_binary.clone()), None);
             }
 
-            if !binary_options.allow_binary_download {
-                return (
-                    Err(anyhow::anyhow!("downloading language servers disabled")),
-                    None,
-                );
-            }
-
             let Some(container_dir) = delegate.language_server_download_dir(&self.name()).await
             else {
                 return (
@@ -869,10 +862,22 @@ where
 
             let last_downloaded_binary = self
                 .cached_server_binary(container_dir.to_path_buf(), delegate.as_ref())
-                .await
-                .context(
-                    "did not find existing language server binary, falling back to downloading",
+                .await;
+            if !binary_options.allow_binary_download {
+                return (
+                    last_downloaded_binary.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "language server {} binary not installed; set lsp.\"{}\".fetch.allow_binary_download to true to allow downloads",
+                            self.name(),
+                            self.name(),
+                        )
+                    }),
+                    None,
                 );
+            }
+            let last_downloaded_binary = last_downloaded_binary.context(
+                "did not find existing language server binary, falling back to downloading",
+            );
             let download_binary = async move {
                 let mut binary = self
                     .try_fetch_server_binary(

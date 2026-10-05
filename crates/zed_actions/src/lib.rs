@@ -75,8 +75,6 @@ actions!(
         OpenStatusPage,
         /// Opens the Zed merch store.
         GetMerch,
-        /// Opens the telemetry log.
-        OpenTelemetryLog,
         /// Opens the performance profiler.
         OpenPerformanceProfiler,
         /// Opens the onboarding view.

@@ -212,9 +212,9 @@ pub struct SettingsContent {
     /// Configuration of audio in Zed.
     pub audio: Option<AudioSettingsContent>,
 
-    /// Whether or not to automatically check for updates.
+    /// Legacy auto-update setting. Automatic checks are disabled; manual checks remain available.
     ///
-    /// Default: true
+    /// Default: false
     pub auto_update: Option<bool>,
 
     /// This base keymap settings adjusts the default keybindings in Zed to be similar
@@ -609,11 +609,11 @@ impl From<Option<String>> for AudioOutputDeviceName {
 pub struct TelemetrySettingsContent {
     /// Send debug info like crash reports.
     ///
-    /// Default: true
+    /// Default: false
     pub diagnostics: Option<bool>,
     /// Send anonymized usage data like what languages you're using Zed with.
     ///
-    /// Default: true
+    /// Default: false
     pub metrics: Option<bool>,
     /// Allow sending requests to Anthropic models that cannot be offered with
     /// Zero Data Retention.
@@ -625,11 +625,19 @@ pub struct TelemetrySettingsContent {
 impl Default for TelemetrySettingsContent {
     fn default() -> Self {
         Self {
-            diagnostics: Some(true),
-            metrics: Some(true),
+            diagnostics: Some(false),
+            metrics: Some(false),
             anthropic_retention: Some(false),
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn telemetry_defaults_to_off() {
+    let defaults = TelemetrySettingsContent::default();
+    assert_eq!(defaults.diagnostics, Some(false));
+    assert_eq!(defaults.metrics, Some(false));
 }
 
 #[with_fallible_options]

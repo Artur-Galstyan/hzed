@@ -7,12 +7,9 @@ use std::sync::Arc;
 
 #[derive(Debug, Default, Clone, RegisterSetting)]
 pub struct ExtensionSettings {
-    /// The extensions that should be automatically installed by Zed.
+    /// Legacy startup extension list. Automatic installation is disabled.
     ///
-    /// This is used to make functionality provided by extensions (e.g., language support)
-    /// available out-of-the-box.
-    ///
-    /// Default: { "html": true }
+    /// Default: {}
     pub auto_install_extensions: HashMap<Arc<str>, bool>,
     pub auto_update_extensions: HashMap<Arc<str>, bool>,
     pub suggest_extensions: bool,

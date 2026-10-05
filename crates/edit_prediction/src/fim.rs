@@ -1,5 +1,5 @@
 use crate::{
-    EditPredictionId, EditPredictionInputs, EditPredictionModelInput, cursor_excerpt,
+    EditPredictionId, EditPredictionModelInput, cursor_excerpt,
     open_ai_compatible::{self, load_open_ai_compatible_api_key_if_needed},
     prediction::EditPredictionResult,
 };
@@ -19,7 +19,6 @@ struct FimRequestOutput {
     edits: Vec<(std::ops::Range<Anchor>, Arc<str>)>,
     editable_range: std::ops::Range<Anchor>,
     snapshot: BufferSnapshot,
-    inputs: Zeta2PromptInput,
     buffer: Entity<Buffer>,
 }
 
@@ -29,7 +28,6 @@ pub fn request_prediction(
         snapshot,
         position,
         events,
-        trigger,
         ..
     }: EditPredictionModelInput,
     prompt_format: EditPredictionPromptFormat,
@@ -139,7 +137,6 @@ pub fn request_prediction(
             edits,
             editable_range,
             snapshot,
-            inputs,
             buffer,
         })
     });
@@ -154,10 +151,6 @@ pub fn request_prediction(
                 output.edits.into(),
                 None,
                 Some(output.editable_range),
-                EditPredictionInputs::V2(output.inputs),
-                None,
-                trigger,
-                cx.background_executor().now() - request_start,
                 cx,
             )
             .await,

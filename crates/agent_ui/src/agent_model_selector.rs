@@ -1,15 +1,16 @@
 use crate::{
     ModelUsageContext,
     language_model_selector::{LanguageModelSelector, language_model_selector},
+    model_selector::authenticate_picker_providers,
     ui::ModelSelectorTooltip,
 };
 use fs::Fs;
 use gpui::{Entity, FocusHandle, SharedString};
 use language_model::{IconOrSvg, LanguageModelRegistry};
-use picker::popover_menu::PickerPopoverMenu;
 use settings::update_settings_file;
+use std::rc::Rc;
 use std::sync::Arc;
-use ui::{PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 
 pub struct AgentModelSelector {
     selector: Entity<LanguageModelSelector>,
@@ -86,7 +87,7 @@ impl AgentModelSelector {
 }
 
 impl Render for AgentModelSelector {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let model = self.selector.read(cx).delegate.active_model(cx);
         let model_name = model
             .as_ref()
@@ -114,35 +115,36 @@ impl Render for AgentModelSelector {
             }
         });
 
-        PickerPopoverMenu::new(
-            self.selector.clone(),
-            Button::new("active-model", model_name)
-                .label_size(LabelSize::Small)
-                .color(color)
-                .when_some(provider_icon, |this, icon| {
-                    this.start_icon(
-                        match icon {
-                            IconOrSvg::Svg(path) => Icon::from_external_svg(path),
-                            IconOrSvg::Icon(name) => Icon::new(name),
-                        }
-                        .color(color)
-                        .size(IconSize::XSmall),
-                    )
-                })
-                .end_icon(
-                    Icon::new(IconName::ChevronDown)
-                        .color(color)
-                        .size(IconSize::XSmall),
-                ),
-            tooltip,
-            gpui::Anchor::TopRight,
-            cx,
-        )
-        .with_handle(self.menu_handle.clone())
-        .offset(gpui::Point {
-            x: px(0.0),
-            y: px(2.0),
-        })
-        .render(window, cx)
+        let picker = self.selector.clone();
+        PopoverMenu::new("popover-menu")
+            .menu(move |_, _| Some(picker.clone()))
+            .on_open(Rc::new(|_, cx| authenticate_picker_providers(cx)))
+            .trigger_with_tooltip(
+                Button::new("active-model", model_name)
+                    .label_size(LabelSize::Small)
+                    .color(color)
+                    .when_some(provider_icon, |this, icon| {
+                        this.start_icon(
+                            match icon {
+                                IconOrSvg::Svg(path) => Icon::from_external_svg(path),
+                                IconOrSvg::Icon(name) => Icon::new(name),
+                            }
+                            .color(color)
+                            .size(IconSize::XSmall),
+                        )
+                    })
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .color(color)
+                            .size(IconSize::XSmall),
+                    ),
+                tooltip,
+            )
+            .anchor(gpui::Anchor::TopRight)
+            .with_handle(self.menu_handle.clone())
+            .offset(gpui::Point {
+                x: px(0.0),
+                y: px(2.0),
+            })
     }
 }

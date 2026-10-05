@@ -635,6 +635,9 @@ impl http_client::Host for WasmState {
         &mut self,
         request: http_client::HttpRequest,
     ) -> wasmtime::Result<Result<http_client::HttpResponse, String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let url = &request.url;
             let request = convert_request(&request)?;
@@ -653,10 +656,12 @@ impl http_client::Host for WasmState {
         &mut self,
         request: http_client::HttpRequest,
     ) -> wasmtime::Result<Result<Resource<ExtensionHttpResponseStream>, String>> {
-        let request = convert_request(&request).into_wasmtime_result()?;
-        let response = self.host.http_client.send(request);
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
-            let response = response.await?;
+            let request = convert_request(&request)?;
+            let response = self.host.http_client.send(request).await?;
             let stream = Arc::new(Mutex::new(response));
             let resource = self.table.push(stream)?;
             Ok(resource)
@@ -755,6 +760,24 @@ async fn convert_response(
     Ok(extension_response)
 }
 
+async fn npm_package_version(
+    node_runtime: &node_runtime::NodeRuntime,
+    work_dir: &Path,
+    package_name: &str,
+    allow_network: bool,
+) -> Result<Version> {
+    if allow_network {
+        return node_runtime.npm_package_latest_version(package_name).await;
+    }
+    node_runtime::read_package_installed_version(work_dir.join("node_modules"), package_name)
+        .await?
+        .with_context(|| {
+            format!(
+                "language server download disabled and package {package_name} is not installed; set lsp.<server>.fetch.allow_binary_download to true to allow downloads"
+            )
+        })
+}
+
 impl nodejs::Host for WasmState {
     async fn node_binary_path(&mut self) -> wasmtime::Result<Result<String, String>> {
         self.host
@@ -769,12 +792,15 @@ impl nodejs::Host for WasmState {
         &mut self,
         package_name: String,
     ) -> wasmtime::Result<Result<String, String>> {
-        self.host
-            .node_runtime
-            .npm_package_latest_version(&package_name)
-            .await
-            .map(|v| v.to_string())
-            .to_wasmtime_result()
+        npm_package_version(
+            &self.host.node_runtime,
+            &self.work_dir(),
+            &package_name,
+            self.allow_language_server_network().is_ok(),
+        )
+        .await
+        .map(|version| version.to_string())
+        .to_wasmtime_result()
     }
 
     async fn npm_package_installed_version(
@@ -794,6 +820,9 @@ impl nodejs::Host for WasmState {
         package_name: String,
         version: String,
     ) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         self.capability_granter
             .grant_npm_install_package(&package_name)
             .into_wasmtime_result()?;
@@ -834,6 +863,9 @@ impl github::Host for WasmState {
         repo: String,
         options: github::GithubReleaseOptions,
     ) -> wasmtime::Result<Result<github::GithubRelease, String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let release = ::http_client::github::latest_github_release(
                 &repo,
@@ -853,6 +885,9 @@ impl github::Host for WasmState {
         repo: String,
         tag: String,
     ) -> wasmtime::Result<Result<github::GithubRelease, String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let release = ::http_client::github::get_release_by_tag_name(
                 &repo,
@@ -902,6 +937,11 @@ impl process::Host for WasmState {
         &mut self,
         command: process::Command,
     ) -> wasmtime::Result<Result<process::Output, String>> {
+        if self.initializing_extension {
+            return Ok(Err(
+                "process execution disabled during extension initialization".to_string(),
+            ));
+        }
         maybe!(async {
             self.capability_granter
                 .grant_exec(&command.command, &command.args)?;
@@ -1079,6 +1119,9 @@ impl ExtensionImports for WasmState {
         path: String,
         file_type: DownloadedFileType,
     ) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let parsed_url = Url::parse(&url)?;
             self.capability_granter.grant_download_file(&parsed_url)?;
@@ -1159,5 +1202,38 @@ impl ExtensionImports for WasmState {
             .await
             .with_context(|| format!("setting permissions for path {path:?}"))
             .to_wasmtime_result()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_npm_package_version_needs_no_network() {
+        let work_dir = tempfile::tempdir().expect("temporary extension directory");
+        let package_name = "@zed-industries/vscode-langservers-extracted";
+        let package_dir = work_dir.path().join("node_modules").join(package_name);
+        std::fs::create_dir_all(&package_dir).expect("create cached package directory");
+        std::fs::write(package_dir.join("package.json"), r#"{"version":"4.10.0"}"#)
+            .expect("write cached package metadata");
+
+        let node_runtime = node_runtime::NodeRuntime::unavailable();
+        let version = futures::executor::block_on(npm_package_version(
+            &node_runtime,
+            work_dir.path(),
+            package_name,
+            false,
+        ))
+        .expect("read local package version without Node or network");
+        assert_eq!(version, Version::new(4, 10, 0));
+
+        let missing = futures::executor::block_on(npm_package_version(
+            &node_runtime,
+            work_dir.path(),
+            "missing-package",
+            false,
+        ));
+        assert!(missing.is_err());
     }
 }

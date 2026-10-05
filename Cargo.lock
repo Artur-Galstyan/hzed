@@ -3062,7 +3062,6 @@ dependencies = [
  "log",
  "objc2-foundation 0.3.2",
  "parking_lot",
- "paths",
  "postage",
  "proxy_handshake",
  "rand 0.9.4",
@@ -3075,9 +3074,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "settings",
- "sha2",
  "smol",
- "telemetry",
  "telemetry_events",
  "text",
  "thiserror 2.0.17",
@@ -5262,8 +5259,6 @@ dependencies = [
  "buffer_diff",
  "client",
  "clock",
- "cloud_api_client",
- "cloud_api_types",
  "cloud_llm_client",
  "collections",
  "copilot",
@@ -5300,7 +5295,6 @@ dependencies = [
  "rand 0.9.4",
  "regex",
  "release_channel",
- "semver",
  "serde",
  "serde_json",
  "settings",
@@ -5319,7 +5313,6 @@ dependencies = [
  "zed_credentials_provider",
  "zeta_prompt",
  "zlog",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -8828,10 +8821,8 @@ name = "input_latency_ui"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "collections",
  "gpui",
  "hdrhistogram",
- "telemetry",
 ]
 
 [[package]]
@@ -17922,11 +17913,6 @@ dependencies = [
 [[package]]
 name = "telemetry"
 version = "0.1.0"
-dependencies = [
- "futures 0.3.34",
- "serde_json",
- "telemetry_events",
-]
 
 [[package]]
 name = "telemetry_events"

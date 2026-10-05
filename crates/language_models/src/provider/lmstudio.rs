@@ -174,7 +174,7 @@ impl LmStudioLanguageModelProvider {
         credentials_provider: Arc<dyn CredentialsProvider>,
         cx: &mut App,
     ) -> Self {
-        let this = Self {
+        Self {
             http_client: http_client.clone(),
             state: cx.new(|cx| {
                 let subscription = cx.observe_global::<SettingsStore>({
@@ -211,10 +211,7 @@ impl LmStudioLanguageModelProvider {
                 }
             }),
             request_limiters: ModelRateLimiters::default(),
-        };
-        this.state
-            .update(cx, |state, cx| state.restart_fetch_models_task(cx));
-        this
+        }
     }
 
     fn api_url(cx: &App) -> String {

@@ -114,9 +114,7 @@ fn edit_prediction_provider_config_for_settings(cx: &App) -> Option<EditPredicti
     match provider {
         EditPredictionProvider::None => None,
         EditPredictionProvider::Copilot => Some(EditPredictionProviderConfig::Copilot),
-        EditPredictionProvider::Zed => {
-            Some(EditPredictionProviderConfig::Zed(EditPredictionModel::Zeta))
-        }
+        EditPredictionProvider::Zed => None,
         EditPredictionProvider::Codestral => Some(EditPredictionProviderConfig::Codestral),
         EditPredictionProvider::Ollama | EditPredictionProvider::OpenAiCompatibleApi => {
             let custom_settings = if provider == EditPredictionProvider::Ollama {
@@ -254,18 +252,6 @@ fn assign_edit_prediction_provider(
         Some(EditPredictionProviderConfig::Zed(model)) => {
             let ep_store = edit_prediction::EditPredictionStore::global(client, &user_store, cx);
 
-            if let Some(organization_configuration) =
-                user_store.read(cx).current_organization_configuration()
-            {
-                if !organization_configuration.edit_prediction.is_enabled {
-                    editor.set_edit_prediction_provider::<ZedEditPredictionDelegate>(
-                        None, trigger, window, cx,
-                    );
-
-                    return;
-                }
-            }
-
             if let Some(project) = editor.project() {
                 ep_store.update(cx, |ep_store, cx| {
                     ep_store.set_edit_prediction_model(model);
@@ -296,6 +282,69 @@ mod tests {
     use gpui::{BorrowAppContext, TestAppContext};
     use settings::{EditPredictionPromptFormatContent, EditPredictionProvider, SettingsStore};
     use workspace::AppState;
+
+    #[gpui::test]
+    async fn test_legacy_zed_provider_does_not_route_to_cloud(cx: &mut TestAppContext) {
+        let app_state = cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            client::init(&app_state.client, cx);
+            language_model::init(cx);
+            app_state
+        });
+
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store: &mut SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.edit_predictions =
+                        Some(settings::EditPredictionSettingsContent {
+                            provider: Some(EditPredictionProvider::Zed),
+                            ..Default::default()
+                        });
+                });
+            });
+            assert!(edit_prediction_provider_config_for_settings(cx).is_none());
+        });
+
+        drop(app_state);
+    }
+
+    #[gpui::test]
+    async fn test_open_ai_compatible_zeta_still_routes_to_local_model(cx: &mut TestAppContext) {
+        let app_state = cx.update(|cx| {
+            let app_state = AppState::test(cx);
+            client::init(&app_state.client, cx);
+            language_model::init(cx);
+            app_state
+        });
+
+        cx.update(|cx| {
+            cx.update_global::<SettingsStore, _>(|store: &mut SettingsStore, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.project.all_languages.edit_predictions =
+                        Some(settings::EditPredictionSettingsContent {
+                            provider: Some(EditPredictionProvider::OpenAiCompatibleApi),
+                            open_ai_compatible_api: Some(
+                                settings::CustomEditPredictionProviderSettingsContent {
+                                    api_url: Some(
+                                        "http://localhost:8080/v1/completions".to_string(),
+                                    ),
+                                    model: Some("zeta-local".to_string()),
+                                    prompt_format: Some(EditPredictionPromptFormatContent::Zeta2),
+                                    ..Default::default()
+                                },
+                            ),
+                            ..Default::default()
+                        });
+                });
+            });
+            assert!(matches!(
+                edit_prediction_provider_config_for_settings(cx),
+                Some(EditPredictionProviderConfig::Zed(EditPredictionModel::Zeta))
+            ));
+        });
+
+        drop(app_state);
+    }
 
     #[gpui::test]
     async fn test_sweep_prompt_format_routes_to_sweep_prompt_model(cx: &mut TestAppContext) {

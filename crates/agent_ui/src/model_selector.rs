@@ -3,7 +3,6 @@ use std::{cmp::Reverse, rc::Rc, sync::Arc};
 use acp_thread::{
     AgentModelIcon, AgentModelId, AgentModelInfo, AgentModelList, AgentModelSelector,
 };
-
 use anyhow::Result;
 use collections::{HashSet, IndexMap};
 use futures::FutureExt;
@@ -13,6 +12,7 @@ use gpui::{
     TaskExt, WeakEntity,
 };
 use itertools::Itertools;
+use language_model::{AuthenticateError, LanguageModelRegistry};
 use ordered_float::OrderedFloat;
 use picker::{Picker, PickerDelegate};
 use settings::SettingsStore;
@@ -36,6 +36,34 @@ pub fn acp_model_selector(
     Picker::list(delegate, window, cx)
         .show_scrollbar(true)
         .initial_width(rems(20.))
+}
+
+pub(crate) fn authenticate_picker_providers(cx: &mut App) {
+    for provider in LanguageModelRegistry::read_global(cx).visible_providers() {
+        if provider.is_authenticated(cx) {
+            continue;
+        }
+        let provider_name = provider.name();
+        let task = provider.authenticate(cx);
+        cx.spawn(async move |cx| {
+            if let Err(error) = task.await
+                && !matches!(
+                    error,
+                    AuthenticateError::CredentialsNotFound | AuthenticateError::ConnectionRefused
+                )
+            {
+                log::error!(
+                    "Failed to authenticate provider {}: {error:#}",
+                    provider_name.0
+                );
+            }
+            cx.update(|cx| {
+                LanguageModelRegistry::global(cx)
+                    .update(cx, |registry, cx| registry.refresh_fallback_model(cx))
+            });
+        })
+        .detach();
+    }
 }
 
 enum ModelPickerEntry {

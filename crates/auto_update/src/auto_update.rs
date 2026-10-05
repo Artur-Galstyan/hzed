@@ -11,7 +11,6 @@ use paths::remote_servers_dir;
 use release_channel::{AppCommitSha, ReleaseChannel};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use settings::{RegisterSetting, Settings, SettingsStore};
 use smol::fs::File;
 use smol::{
     fs,
@@ -247,18 +246,6 @@ async fn unmount_disk_image(mount_path: &Path) {
     }
 }
 
-#[derive(Clone, Copy, Debug, RegisterSetting)]
-struct AutoUpdateSetting(bool);
-
-/// Whether or not to automatically check for updates.
-///
-/// Default: true
-impl Settings for AutoUpdateSetting {
-    fn from_settings(content: &settings::SettingsContent) -> Self {
-        Self(content.auto_update.unwrap())
-    }
-}
-
 #[derive(Default)]
 struct GlobalAutoUpdate(Option<Entity<AutoUpdater>>);
 
@@ -275,35 +262,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     .detach();
 
     let version = release_channel::AppVersion::global(cx);
-    let auto_updater = cx.new(|cx| {
-        let updater = AutoUpdater::new(version, client, cx);
-
-        let poll_for_updates = ReleaseChannel::try_global(cx)
-            .map(|channel| channel.poll_for_updates())
-            .unwrap_or(false);
-
-        if option_env!("ZED_UPDATE_EXPLANATION").is_none()
-            && env::var("ZED_UPDATE_EXPLANATION").is_err()
-            && poll_for_updates
-        {
-            let mut update_subscription = AutoUpdateSetting::get_global(cx)
-                .0
-                .then(|| updater.start_polling(cx));
-
-            cx.observe_global::<SettingsStore>(move |updater: &mut AutoUpdater, cx| {
-                if AutoUpdateSetting::get_global(cx).0 {
-                    if update_subscription.is_none() {
-                        update_subscription = Some(updater.start_polling(cx))
-                    }
-                } else {
-                    update_subscription.take();
-                }
-            })
-            .detach();
-        }
-
-        updater
-    });
+    let auto_updater = cx.new(|cx| AutoUpdater::new(version, client, cx));
     cx.set_global(GlobalAutoUpdate(Some(auto_updater)));
 }
 
@@ -1361,14 +1320,14 @@ mod tests {
     use client::Client;
     use clock::FakeSystemClock;
     use futures::channel::oneshot;
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, UpdateGlobal as _};
     use http_client::{FakeHttpClient, Response};
-    use settings::default_settings;
+    use settings::{SettingsStore, default_settings};
     use std::{
         rc::Rc,
         sync::{
             Arc,
-            atomic::{self, AtomicBool},
+            atomic::{self, AtomicBool, AtomicUsize},
         },
     };
     use tempfile::tempdir;
@@ -1384,18 +1343,50 @@ mod tests {
     impl Global for InstallOverride {}
 
     #[gpui::test]
-    fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
+    fn test_auto_update_defaults_to_false(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let mut store = SettingsStore::new(cx, &settings::default_settings());
-            store
-                .set_default_settings(&default_settings(), cx)
-                .expect("Unable to set default settings");
-            store
-                .set_user_settings("{}", cx)
-                .expect("Unable to set user settings");
-            cx.set_global(store);
-            assert!(AutoUpdateSetting::get_global(cx).0);
+            let store = SettingsStore::new(cx, &default_settings());
+            assert_eq!(store.raw_default_settings().auto_update, Some(false));
         });
+    }
+
+    #[gpui::test]
+    fn test_old_auto_update_setting_does_not_start_polling(cx: &mut TestAppContext) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        cx.update(|cx| {
+            settings::init(cx);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| content.auto_update = Some(true));
+            });
+            release_channel::init_test(Version::new(0, 100, 0), ReleaseChannel::Stable, cx);
+            let http = FakeHttpClient::create({
+                let requests = requests.clone();
+                move |_| {
+                    let requests = requests.clone();
+                    async move {
+                        requests.fetch_add(1, atomic::Ordering::SeqCst);
+                        Ok(Response::builder().status(404).body("".into()).unwrap())
+                    }
+                }
+            });
+            init(Client::new(Arc::new(FakeSystemClock::new()), http, cx), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(requests.load(atomic::Ordering::SeqCst), 0);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| content.auto_update = Some(false));
+                store.update_user_settings(cx, |content| content.auto_update = Some(true));
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(requests.load(atomic::Ordering::SeqCst), 0);
+
+        let updater = cx.update(|cx| AutoUpdater::get(cx).expect("manual updater available"));
+        updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
+        cx.run_until_parked();
+        assert_eq!(requests.load(atomic::Ordering::SeqCst), 1);
     }
 
     #[gpui::test]
@@ -1452,7 +1443,7 @@ mod tests {
         });
 
         release_available.store(true, atomic::Ordering::SeqCst);
-        cx.background_executor.advance_clock(POLL_INTERVAL);
+        auto_updater.update(cx, |updater, cx| updater.poll(UpdateCheckType::Manual, cx));
         cx.background_executor.run_until_parked();
 
         loop {

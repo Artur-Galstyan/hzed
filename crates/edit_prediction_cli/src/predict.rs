@@ -13,9 +13,9 @@ use crate::{
 };
 use anyhow::Context as _;
 use cloud_llm_client::predict_edits_v3::{RawCompletionRequest, RawCompletionResponse};
-use edit_prediction::{DebugEvent, EditPredictionStore, Zeta2RawConfig};
-use futures::{AsyncReadExt as _, FutureExt as _, StreamExt as _, future::Shared};
-use gpui::{AppContext as _, AsyncApp, Task};
+use edit_prediction::{DebugEvent, EditPredictionStore};
+use futures::StreamExt as _;
+use gpui::{AppContext as _, AsyncApp};
 use http_client::{AsyncBody, HttpClient, Method};
 use reqwest_client::ReqwestClient;
 use std::{
@@ -56,6 +56,15 @@ pub async fn run_prediction(
             "No existing predictions found. Use --provider to specify which model to use for prediction."
         );
     };
+
+    if matches!(
+        provider,
+        PredictionProvider::Zeta1 | PredictionProvider::Zeta2(_)
+    ) {
+        anyhow::bail!(
+            "Zeta CLI requests are unavailable without an explicit self-hosted Ollama or OpenAI-compatible provider. Use Zed's edit prediction settings for live requests, or use the CLI format-prompt and parse-output modes."
+        );
+    }
 
     if let PredictionProvider::Teacher(backend, _)
     | PredictionProvider::TeacherNonBatching(backend, _)
@@ -129,26 +138,6 @@ pub async fn run_prediction(
 
     let step_progress = example_progress.start(Step::Predict);
 
-    if matches!(
-        provider,
-        PredictionProvider::Zeta1 | PredictionProvider::Zeta2(_)
-    ) {
-        step_progress.set_substatus("authenticating");
-        static AUTHENTICATED: OnceLock<Shared<Task<()>>> = OnceLock::new();
-        AUTHENTICATED
-            .get_or_init(|| {
-                let client = app_state.client.clone();
-                cx.spawn(async move |cx| {
-                    if let Err(e) = client.sign_in_with_optional_connect(true, cx).await {
-                        eprintln!("Authentication failed: {}", e);
-                    }
-                })
-                .shared()
-            })
-            .clone()
-            .await;
-    }
-
     let ep_store = cx
         .update(|cx| EditPredictionStore::try_global(cx))
         .context("EditPredictionStore not initialized")?;
@@ -168,20 +157,6 @@ pub async fn run_prediction(
             }
         };
         store.set_edit_prediction_model(model);
-
-        // If user specified a non-default Zeta2 version, configure raw endpoint.
-        // ZED_ZETA_MODEL env var is optional.
-        if let PredictionProvider::Zeta2(format) = provider {
-            if format != ZetaFormat::default() {
-                let model_id = std::env::var("ZED_ZETA_MODEL").ok();
-                let environment = std::env::var("ZED_ZETA_ENVIRONMENT").ok();
-                store.set_zeta2_raw_config(Zeta2RawConfig {
-                    model_id,
-                    environment,
-                    format,
-                });
-            }
-        }
     });
     step_progress.set_substatus("configuring model");
     let state = example.state.as_ref().context("state must be set")?;

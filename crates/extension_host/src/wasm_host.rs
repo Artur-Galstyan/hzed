@@ -91,24 +91,29 @@ impl extension::Extension for WasmExtension {
         language_name: LanguageName,
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
+        allow_binary_download: bool,
     ) -> Result<Command> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let command = extension
-                    .call_language_server_command(
-                        store,
-                        &language_server_id,
-                        &language_name,
-                        resource,
-                    )
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
+        self.call_with_language_server_status_source(
+            status_source,
+            allow_binary_download,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let command = extension
+                        .call_language_server_command(
+                            store,
+                            &language_server_id,
+                            &language_name,
+                            resource,
+                        )
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
 
-                Ok(command.into())
-            }
-            .boxed()
-        })
+                    Ok(command.into())
+                }
+                .boxed()
+            },
+        )
         .await?
     }
 
@@ -119,22 +124,26 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let options = extension
-                    .call_language_server_initialization_options(
-                        store,
-                        &language_server_id,
-                        &language_name,
-                        resource,
-                    )
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
-                anyhow::Ok(options)
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let options = extension
+                        .call_language_server_initialization_options(
+                            store,
+                            &language_server_id,
+                            &language_name,
+                            resource,
+                        )
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
+                    anyhow::Ok(options)
+                }
+                .boxed()
+            },
+        )
         .await?
     }
 
@@ -144,21 +153,25 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let options = extension
-                    .call_language_server_workspace_configuration(
-                        store,
-                        &language_server_id,
-                        resource,
-                    )
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
-                anyhow::Ok(options)
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let options = extension
+                        .call_language_server_workspace_configuration(
+                            store,
+                            &language_server_id,
+                            resource,
+                        )
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
+                    anyhow::Ok(options)
+                }
+                .boxed()
+            },
+        )
         .await?
     }
 
@@ -168,19 +181,23 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                extension
-                    .call_language_server_initialization_options_schema(
-                        store,
-                        &language_server_id,
-                        resource,
-                    )
-                    .await
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    extension
+                        .call_language_server_initialization_options_schema(
+                            store,
+                            &language_server_id,
+                            resource,
+                        )
+                        .await
+                }
+                .boxed()
+            },
+        )
         .await?
         .map_err(anyhow::Error::from)
     }
@@ -191,19 +208,23 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                extension
-                    .call_language_server_workspace_configuration_schema(
-                        store,
-                        &language_server_id,
-                        resource,
-                    )
-                    .await
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    extension
+                        .call_language_server_workspace_configuration_schema(
+                            store,
+                            &language_server_id,
+                            resource,
+                        )
+                        .await
+                }
+                .boxed()
+            },
+        )
         .await?
         .map_err(anyhow::Error::from)
     }
@@ -215,22 +236,26 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let options = extension
-                    .call_language_server_additional_initialization_options(
-                        store,
-                        &language_server_id,
-                        &target_language_server_id,
-                        resource,
-                    )
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
-                anyhow::Ok(options)
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let options = extension
+                        .call_language_server_additional_initialization_options(
+                            store,
+                            &language_server_id,
+                            &target_language_server_id,
+                            resource,
+                        )
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
+                    anyhow::Ok(options)
+                }
+                .boxed()
+            },
+        )
         .await?
     }
 
@@ -241,22 +266,26 @@ impl extension::Extension for WasmExtension {
         worktree: Arc<dyn WorktreeDelegate>,
         status_source: EntityId,
     ) -> Result<Option<String>> {
-        self.call_with_language_server_status_source(status_source, move |extension, store| {
-            async move {
-                let resource = store.data_mut().table.push(worktree)?;
-                let options = extension
-                    .call_language_server_additional_workspace_configuration(
-                        store,
-                        &language_server_id,
-                        &target_language_server_id,
-                        resource,
-                    )
-                    .await?
-                    .map_err(|err| store.data().extension_error(err))?;
-                anyhow::Ok(options)
-            }
-            .boxed()
-        })
+        self.call_with_language_server_status_source(
+            status_source,
+            false,
+            move |extension, store| {
+                async move {
+                    let resource = store.data_mut().table.push(worktree)?;
+                    let options = extension
+                        .call_language_server_additional_workspace_configuration(
+                            store,
+                            &language_server_id,
+                            &target_language_server_id,
+                            resource,
+                        )
+                        .await?
+                        .map_err(|err| store.data().extension_error(err))?;
+                    anyhow::Ok(options)
+                }
+                .boxed()
+            },
+        )
         .await?
     }
 
@@ -546,6 +575,8 @@ pub struct WasmState {
     pub host: Arc<WasmHost>,
     pub(crate) capability_granter: CapabilityGranter,
     pub(crate) language_server_status_source: Option<gpui::EntityId>,
+    allow_language_server_download: bool,
+    initializing_extension: bool,
 }
 
 type MainThreadCall = Box<dyn Send + for<'a> FnOnce(&'a mut AsyncApp) -> LocalBoxFuture<'a, ()>>;
@@ -680,6 +711,8 @@ impl WasmHost {
                         manifest.clone(),
                     ),
                     language_server_status_source: None,
+                    allow_language_server_download: false,
+                    initializing_extension: true,
                 },
             );
             // Store will yield after 1 tick, and get a new deadline of 1 tick after each yield.
@@ -700,6 +733,7 @@ impl WasmHost {
                 .await
                 .map_err(anyhow::Error::from)
                 .context("failed to initialize wasm extension")?;
+            store.data_mut().initializing_extension = false;
 
             let (tx, mut rx) = mpsc::unbounded::<ExtensionCall>();
             let extension_task = async move {
@@ -884,6 +918,7 @@ impl WasmExtension {
     async fn call_with_language_server_status_source<T, Fn>(
         &self,
         source: EntityId,
+        allow_binary_download: bool,
         f: Fn,
     ) -> Result<T>
     where
@@ -900,8 +935,10 @@ impl WasmExtension {
                 // source through WasmState for the duration of this serialized extension call.
                 // Clear it before returning so failed calls cannot affect the next invocation.
                 store.data_mut().language_server_status_source = Some(source);
+                store.data_mut().allow_language_server_download = allow_binary_download;
                 let result = f(extension, store).await;
                 store.data_mut().language_server_status_source = None;
+                store.data_mut().allow_language_server_download = false;
                 result
             }
             .boxed()
@@ -942,6 +979,31 @@ impl WasmExtension {
 }
 
 impl WasmState {
+    fn allow_language_server_network(&self) -> Result<()> {
+        anyhow::ensure!(
+            Self::network_allowed(
+                self.initializing_extension,
+                self.language_server_status_source.is_some(),
+                self.allow_language_server_download,
+            ),
+            "{}",
+            if self.initializing_extension {
+                "network access disabled during extension initialization"
+            } else {
+                "language server download disabled; set lsp.<server>.fetch.allow_binary_download to true to allow downloads"
+            }
+        );
+        Ok(())
+    }
+
+    fn network_allowed(
+        initializing_extension: bool,
+        in_language_server_call: bool,
+        allow_binary_download: bool,
+    ) -> bool {
+        !initializing_extension && (!in_language_server_call || allow_binary_download)
+    }
+
     fn on_main_thread<T, Fn>(&self, f: Fn) -> impl 'static + Future<Output = T>
     where
         T: 'static + Send,
@@ -1043,6 +1105,15 @@ mod tests {
     use node_runtime::NodeRuntime;
     use serde_json::json;
     use settings::SettingsStore;
+
+    #[test]
+    fn test_language_server_requests_need_opt_in() {
+        assert!(!WasmState::network_allowed(false, true, false));
+        assert!(WasmState::network_allowed(false, true, true));
+        assert!(WasmState::network_allowed(false, false, false));
+        assert!(!WasmState::network_allowed(true, false, false));
+        assert!(!WasmState::network_allowed(true, true, true));
+    }
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {

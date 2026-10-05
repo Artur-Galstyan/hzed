@@ -794,7 +794,7 @@ impl Settings for AgentSettings {
                 None
             },
             flexible: agent.flexible.unwrap(),
-            default_model: Some(agent.default_model.unwrap()),
+            default_model: agent.default_model,
             subagent_model: agent.subagent_model,
             inline_assistant_model: agent.inline_assistant_model,
             inline_assistant_use_streaming_tools: agent
@@ -1087,6 +1087,30 @@ mod tests {
     fn test_invalid_regex_returns_none() {
         let result = CompiledRegex::new("[invalid(regex", false);
         assert!(result.is_none());
+    }
+
+    #[gpui::test]
+    fn test_default_model_is_optional_and_preserves_user_selection(cx: &mut gpui::App) {
+        let store = SettingsStore::test(cx);
+        cx.set_global(store);
+        project::DisableAiSettings::register(cx);
+        AgentSettings::register(cx);
+        assert!(AgentSettings::get_global(cx).default_model.is_none());
+
+        SettingsStore::update_global(cx, |store, cx| {
+            store
+                .set_user_settings(
+                    r#"{"agent":{"default_model":{"provider":"ollama","model":"coder:latest"}}}"#,
+                    cx,
+                )
+                .expect("user settings should load");
+        });
+        let selection = AgentSettings::get_global(cx)
+            .default_model
+            .as_ref()
+            .expect("user-selected model should remain available");
+        assert_eq!(selection.provider.0.as_str(), "ollama");
+        assert_eq!(selection.model, "coder:latest");
     }
 
     #[gpui::test]

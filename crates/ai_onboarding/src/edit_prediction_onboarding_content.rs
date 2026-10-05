@@ -1,47 +1,32 @@
 use std::sync::Arc;
 
 use client::{Client, UserStore};
-use cloud_api_types::Plan;
-use gpui::{Entity, IntoElement, ParentElement};
+use gpui::{Action, Entity, IntoElement, ParentElement};
 use ui::prelude::*;
 
-use crate::ZedAiOnboarding;
-
 pub struct EditPredictionOnboarding {
-    user_store: Entity<UserStore>,
-    client: Arc<Client>,
     copilot_is_configured: bool,
-    continue_with_zed_ai: Arc<dyn Fn(&mut Window, &mut App)>,
     continue_with_copilot: Arc<dyn Fn(&mut Window, &mut App)>,
 }
 
 impl EditPredictionOnboarding {
     pub fn new(
-        user_store: Entity<UserStore>,
-        client: Arc<Client>,
+        _user_store: Entity<UserStore>,
+        _client: Arc<Client>,
         copilot_is_configured: bool,
-        continue_with_zed_ai: Arc<dyn Fn(&mut Window, &mut App)>,
+        _continue_with_zed_ai: Arc<dyn Fn(&mut Window, &mut App)>,
         continue_with_copilot: Arc<dyn Fn(&mut Window, &mut App)>,
         _cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            user_store,
             copilot_is_configured,
-            client,
-            continue_with_zed_ai,
             continue_with_copilot,
         }
     }
 }
 
 impl Render for EditPredictionOnboarding {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_free_plan = self
-            .user_store
-            .read(cx)
-            .plan()
-            .is_some_and(|plan| plan == Plan::ZedFree);
-
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let github_copilot = v_flex()
             .gap_1()
             .child(Label::new(if self.copilot_is_configured {
@@ -68,14 +53,25 @@ impl Render for EditPredictionOnboarding {
 
         v_flex()
             .gap_2()
-            .child(ZedAiOnboarding::new(
-                self.client.clone(),
-                &self.user_store,
-                self.continue_with_zed_ai.clone(),
-                cx,
+            .child(Label::new(
+                "Choose an edit prediction provider in settings.",
             ))
-            .when(is_free_plan, |this| {
-                this.child(ui::Divider::horizontal()).child(github_copilot)
-            })
+            .child(
+                Button::new("configure-edit-predictions", "Configure Providers")
+                    .full_width()
+                    .style(ButtonStyle::Outlined)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(
+                            zed_actions::OpenSettingsAt {
+                                path: "edit_predictions.providers".to_string(),
+                                target: None,
+                            }
+                            .boxed_clone(),
+                            cx,
+                        );
+                    }),
+            )
+            .child(ui::Divider::horizontal())
+            .child(github_copilot)
     }
 }

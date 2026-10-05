@@ -2,11 +2,13 @@ use std::rc::Rc;
 
 use acp_thread::{AgentModelIcon, AgentModelInfo, AgentModelSelector};
 use gpui::{Entity, FocusHandle};
-use picker::popover_menu::PickerPopoverMenu;
-use ui::{PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 
 use crate::ui::ModelSelectorTooltip;
-use crate::{ModelSelector, model_selector::acp_model_selector};
+use crate::{
+    ModelSelector,
+    model_selector::{acp_model_selector, authenticate_picker_providers},
+};
 
 pub struct ModelSelectorPopover {
     selector: Entity<ModelSelector>,
@@ -22,8 +24,9 @@ impl ModelSelectorPopover {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            selector: cx
-                .new(move |cx| acp_model_selector(selector, focus_handle.clone(), window, cx)),
+            selector: cx.new(move |cx| {
+                acp_model_selector(selector, focus_handle.clone(), window, cx).popover()
+            }),
             menu_handle,
         }
     }
@@ -44,7 +47,7 @@ impl ModelSelectorPopover {
 }
 
 impl Render for ModelSelectorPopover {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let selector = self.selector.read(cx);
         let model = selector.delegate.active_model();
         let model_name = model
@@ -70,27 +73,32 @@ impl Render for ModelSelectorPopover {
             }
         });
 
-        PickerPopoverMenu::new(
-            self.selector.clone(),
-            Button::new("active-model", model_name)
-                .label_size(LabelSize::Small)
-                .color(color)
-                .when_some(model_icon, |this, icon| {
-                    this.start_icon(
-                        match icon {
-                            AgentModelIcon::Path(path) => Icon::from_external_svg(path),
-                            AgentModelIcon::Named(icon_name) => Icon::new(icon_name),
-                        }
-                        .color(color)
-                        .size(IconSize::XSmall),
-                    )
-                })
-                .end_icon(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
-            tooltip,
-            gpui::Anchor::BottomRight,
-            cx,
-        )
-        .with_handle(self.menu_handle.clone())
-        .render(window, cx)
+        let picker = self.selector.clone();
+        PopoverMenu::new("popover-menu")
+            .menu(move |_, _| Some(picker.clone()))
+            .on_open(Rc::new(|_, cx| authenticate_picker_providers(cx)))
+            .trigger_with_tooltip(
+                Button::new("active-model", model_name)
+                    .label_size(LabelSize::Small)
+                    .color(color)
+                    .when_some(model_icon, |this, icon| {
+                        this.start_icon(
+                            match icon {
+                                AgentModelIcon::Path(path) => Icon::from_external_svg(path),
+                                AgentModelIcon::Named(icon_name) => Icon::new(icon_name),
+                            }
+                            .color(color)
+                            .size(IconSize::XSmall),
+                        )
+                    })
+                    .end_icon(Icon::new(icon).color(Color::Muted).size(IconSize::XSmall)),
+                tooltip,
+            )
+            .anchor(gpui::Anchor::BottomRight)
+            .with_handle(self.menu_handle.clone())
+            .offset(gpui::Point {
+                x: px(0.0),
+                y: px(-2.0),
+            })
     }
 }

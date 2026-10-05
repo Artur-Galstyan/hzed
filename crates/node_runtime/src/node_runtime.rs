@@ -147,63 +147,54 @@ impl NodeRuntime {
             None
         };
 
-        let instance = if options.allow_binary_download {
-            let (log_level, why_using_managed) = match system_node_error {
-                Some(err @ DetectError::Other(_)) => (Level::Warn, err.to_string()),
-                Some(err @ DetectError::NotInPath(_)) => (Level::Info, err.to_string()),
-                None => (
-                    Level::Info,
-                    "`node.ignore_system_version` is `true` in settings".to_string(),
-                ),
-            };
-            match ManagedNodeRuntime::install_if_needed(&state.http).await {
-                Ok(instance) => {
-                    log::log!(
-                        log_level,
-                        "using Zed managed Node.js at {} since {}",
-                        instance.installation_path.display(),
-                        why_using_managed
-                    );
-                    Box::new(instance) as Box<dyn NodeRuntimeTrait>
-                }
-                Err(err) => {
-                    // failure case is cached, since downloading + installing may be expensive. The
-                    // downside of this is that it may fail due to an intermittent network issue.
-                    //
-                    // TODO: Have `install_if_needed` indicate which failure cases are retryable
-                    // and/or have shared tracking of when internet is available.
-                    Box::new(UnavailableNodeRuntime {
-                        error_message: format!(
-                            "failure while downloading and/or installing Zed managed Node.js, \
-                            restart Zed to retry: {}",
-                            err
-                        )
-                        .into(),
-                    }) as Box<dyn NodeRuntimeTrait>
-                }
+        let managed = ManagedNodeRuntime::install_if_needed(
+            &state.http,
+            options.allow_binary_download,
+            &paths::data_dir().join("node"),
+        )
+        .await;
+        let instance: Box<dyn NodeRuntimeTrait> = match (options.allow_binary_download, managed) {
+            (allow_download, Ok(instance)) => {
+                let (log_level, reason) = match &system_node_error {
+                    Some(err @ DetectError::Other(_)) => (Level::Warn, err.to_string()),
+                    Some(err @ DetectError::NotInPath(_)) => (Level::Info, err.to_string()),
+                    None => (
+                        Level::Info,
+                        "`node.ignore_system_version` is `true` in settings".to_string(),
+                    ),
+                };
+                log::log!(
+                    log_level,
+                    "using {} managed Node.js at {} since {}",
+                    if allow_download { "Zed" } else { "cached Zed" },
+                    instance.installation_path.display(),
+                    reason
+                );
+                Box::new(instance)
             }
-        } else if let Some(system_node_error) = system_node_error {
-            // failure case not cached, since it's cheap to check again
-            //
-            // TODO: When support is added for setting `options.allow_binary_download`, update this
-            // error message.
-            return Box::new(UnavailableNodeRuntime {
-                error_message: format!(
-                    "failure while checking system Node.js from PATH: {}",
-                    system_node_error
-                )
-                .into(),
-            });
-        } else {
-            // failure case is cached because it will always happen with these options
-            //
-            // TODO: When support is added for setting `options.allow_binary_download`, update this
-            // error message.
-            Box::new(UnavailableNodeRuntime {
-                error_message: "`node` settings do not allow any way to use Node.js"
-                    .to_string()
+            (true, Err(err)) => {
+                // A failed download can be expensive to retry; retry after restart.
+                Box::new(UnavailableNodeRuntime {
+                    error_message: format!(
+                        "failure while downloading and/or installing Zed managed Node.js, \
+                        restart Zed to retry: {}",
+                        err
+                    )
                     .into(),
-            })
+                })
+            }
+            (false, Err(err)) => {
+                let reason = system_node_error
+                    .map(|error| format!("system Node.js from PATH: {error}; "))
+                    .unwrap_or_default();
+                return Box::new(UnavailableNodeRuntime {
+                    error_message: format!(
+                        "no usable Node.js: {reason}cached Zed installation: {err}; \
+                        set node.path or node.allow_binary_download to true"
+                    )
+                    .into(),
+                });
+            }
         };
 
         state.instance = Some(instance.boxed_clone());
@@ -616,8 +607,12 @@ impl ManagedNodeRuntime {
     #[cfg(windows)]
     const NPM_PATH: &str = "node_modules/npm/bin/npm-cli.js";
 
-    async fn install_if_needed(http: &Arc<dyn HttpClient>) -> Result<Self> {
-        log::info!("Node runtime install_if_needed");
+    async fn install_if_needed(
+        http: &Arc<dyn HttpClient>,
+        allow_binary_download: bool,
+        node_containing_dir: &Path,
+    ) -> Result<Self> {
+        log::info!("checking Zed managed Node.js installation");
 
         let os = match consts::OS {
             "macos" => "darwin",
@@ -634,50 +629,53 @@ impl ManagedNodeRuntime {
 
         let version = Self::VERSION;
         let folder_name = format!("node-{version}-{os}-{arch}");
-        let node_containing_dir = paths::data_dir().join("node");
         let node_dir = node_containing_dir.join(folder_name);
         let node_binary = node_dir.join(Self::NODE_PATH);
         let npm_file = node_dir.join(Self::NPM_PATH);
         let node_ca_certs = env::var(NODE_CA_CERTS_ENV_VAR).unwrap_or_else(|_| String::new());
 
-        let valid = if fs::metadata(&node_binary).await.is_ok() {
-            let result = util::command::new_command(&node_binary)
-                .env(NODE_CA_CERTS_ENV_VAR, node_ca_certs)
-                .arg(npm_file)
-                .arg("--version")
-                .args(["--cache".into(), node_dir.join("cache")])
-                .args(["--userconfig".into(), node_dir.join("blank_user_npmrc")])
-                .args(["--globalconfig".into(), node_dir.join("blank_global_npmrc")])
-                .output()
-                .await;
-            match result {
-                Ok(output) => {
-                    if output.status.success() {
-                        true
-                    } else {
+        let valid =
+            if fs::metadata(&node_binary).await.is_ok() && fs::metadata(&npm_file).await.is_ok() {
+                let result = util::command::new_command(&node_binary)
+                    .env(NODE_CA_CERTS_ENV_VAR, node_ca_certs)
+                    .arg(npm_file)
+                    .arg("--version")
+                    .args(["--cache".into(), node_dir.join("cache")])
+                    .args(["--userconfig".into(), node_dir.join("blank_user_npmrc")])
+                    .args(["--globalconfig".into(), node_dir.join("blank_global_npmrc")])
+                    .output()
+                    .await;
+                match result {
+                    Ok(output) => {
+                        if output.status.success() {
+                            true
+                        } else {
+                            log::warn!(
+                                "Zed managed Node.js binary at {} failed check with output: {:?}",
+                                node_binary.display(),
+                                output
+                            );
+                            false
+                        }
+                    }
+                    Err(err) => {
                         log::warn!(
-                            "Zed managed Node.js binary at {} failed check with output: {:?}",
+                            "Zed managed Node.js binary at {} failed check: {}",
                             node_binary.display(),
-                            output
+                            err
                         );
                         false
                     }
                 }
-                Err(err) => {
-                    log::warn!(
-                        "Zed managed Node.js binary at {} failed check, so re-downloading it. \
-                        Error: {}",
-                        node_binary.display(),
-                        err
-                    );
-                    false
-                }
-            }
-        } else {
-            false
-        };
+            } else {
+                false
+            };
 
         if !valid {
+            anyhow::ensure!(
+                allow_binary_download,
+                "cached managed Node.js is unavailable and downloads are disabled"
+            );
             _ = fs::remove_dir_all(&node_containing_dir).await;
             fs::create_dir(&node_containing_dir)
                 .await
@@ -718,12 +716,14 @@ impl ManagedNodeRuntime {
             log::info!("Extracted Node.js to {}", node_containing_dir.display())
         }
 
-        _ = fs::remove_dir_all(node_dir.join("cache")).await;
+        if allow_binary_download {
+            _ = fs::remove_dir_all(node_dir.join("cache")).await;
 
-        // Note: Not in the `if !valid {}` so we can populate these for existing installations
-        _ = fs::create_dir(node_dir.join("cache")).await;
-        _ = fs::write(node_dir.join("blank_user_npmrc"), []).await;
-        _ = fs::write(node_dir.join("blank_global_npmrc"), []).await;
+            // Populate these for existing installations as well.
+            _ = fs::create_dir(node_dir.join("cache")).await;
+            _ = fs::write(node_dir.join("blank_user_npmrc"), []).await;
+            _ = fs::write(node_dir.join("blank_global_npmrc"), []).await;
+        }
 
         anyhow::Ok(ManagedNodeRuntime {
             installation_path: node_dir,
@@ -1336,6 +1336,12 @@ pub fn npm_command_env(node_binary: &Path) -> HashMap<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(
+        unix,
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    use std::sync::Arc;
     use std::{
         env, fs,
         path::{Path, PathBuf},
@@ -1344,13 +1350,82 @@ mod tests {
 
     use anyhow::{Result, bail};
     use http_client::Url;
+    #[cfg(all(
+        unix,
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    use http_client::{BlockedHttpClient, HttpClient};
     use semver::{Version, VersionReq};
 
+    #[cfg(all(
+        unix,
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    use super::ManagedNodeRuntime;
     use super::{
         NodeDiscoveryError, NpmInfo, VersionStrategy, build_npm_command_args, check_node_version,
         deserialize_npm_info_from_response, find_node_path, proxy_argument,
         select_npm_package_version, should_install_npm_package_version,
     };
+
+    #[cfg(all(
+        unix,
+        any(target_os = "macos", target_os = "linux"),
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn test_cached_managed_node_needs_no_download() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir()?;
+        let node_root = root.path().join("node");
+        let operating_system = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        };
+        let architecture = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x64"
+        };
+        let node_dir = node_root.join(format!(
+            "node-{}-{operating_system}-{architecture}",
+            ManagedNodeRuntime::VERSION
+        ));
+        let binary_dir = node_dir.join("bin");
+        fs::create_dir_all(&binary_dir)?;
+        let binary = binary_dir.join("node");
+        fs::write(&binary, "#!/bin/sh\nexit 0\n")?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
+        fs::write(binary_dir.join("npm"), "cached npm")?;
+
+        let http: Arc<dyn HttpClient> = Arc::new(BlockedHttpClient);
+        let cached = smol::block_on(ManagedNodeRuntime::install_if_needed(
+            &http, false, &node_root,
+        ))?;
+        assert_eq!(cached.installation_path, node_dir);
+        assert!(binary.exists());
+
+        let opted_in = smol::block_on(ManagedNodeRuntime::install_if_needed(
+            &http, true, &node_root,
+        ))?;
+        assert_eq!(opted_in.installation_path, node_dir);
+
+        let missing_root = root.path().join("missing");
+        let error = smol::block_on(ManagedNodeRuntime::install_if_needed(
+            &http,
+            false,
+            &missing_root,
+        ))
+        .err()
+        .expect("missing managed Node should fail without downloads");
+        assert!(error.to_string().contains("downloads are disabled"));
+        assert!(!missing_root.exists());
+        Ok(())
+    }
 
     #[test]
     fn test_node_lookup_distinguishes_basenames_and_relative_paths() -> Result<()> {

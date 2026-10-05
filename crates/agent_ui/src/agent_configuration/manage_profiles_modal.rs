@@ -20,6 +20,7 @@ use workspace::{ModalView, Workspace};
 use crate::agent_configuration::manage_profiles_modal::profile_modal_header::ProfileModalHeader;
 use crate::agent_configuration::tool_picker::{ToolPicker, ToolPickerDelegate};
 use crate::language_model_selector::{LanguageModelSelector, language_model_selector};
+use crate::model_selector::authenticate_picker_providers;
 use crate::{AgentPanel, ManageProfiles};
 
 enum Mode {
@@ -308,6 +309,7 @@ impl ManageProfilesModal {
             model_picker,
             _subscription: dismiss_subscription,
         };
+        authenticate_picker_providers(cx);
         self.focus_handle(cx).focus(window, cx);
     }
 

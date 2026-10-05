@@ -506,7 +506,6 @@ impl LocalLspStore {
             settings,
             toolchain.clone(),
             delegate.clone(),
-            true,
             wait_until_worktree_trust,
             cx,
         );
@@ -711,6 +710,26 @@ impl LocalLspStore {
         server_id
     }
 
+    fn binary_options(settings: &LspSettings) -> LanguageServerBinaryOptions {
+        LanguageServerBinaryOptions {
+            allow_path_lookup: !settings
+                .binary
+                .as_ref()
+                .and_then(|binary| binary.ignore_system_version)
+                .unwrap_or_default(),
+            allow_binary_download: settings
+                .fetch
+                .as_ref()
+                .and_then(|fetch| fetch.allow_binary_download)
+                .unwrap_or_default(),
+            pre_release: settings
+                .fetch
+                .as_ref()
+                .and_then(|fetch| fetch.pre_release)
+                .unwrap_or(false),
+        }
+    }
+
     fn get_language_server_binary(
         &self,
         worktree_abs_path: Arc<Path>,
@@ -718,7 +737,6 @@ impl LocalLspStore {
         settings: Arc<LspSettings>,
         toolchain: Option<Toolchain>,
         delegate: Arc<dyn LspAdapterDelegate>,
-        allow_binary_download: bool,
         wait_until_worktree_trust: Option<watch::Receiver<bool>>,
         cx: &mut App,
     ) -> Task<Result<LanguageServerBinary>> {
@@ -802,19 +820,7 @@ impl LocalLspStore {
             )));
         }
 
-        let lsp_binary_options = LanguageServerBinaryOptions {
-            allow_path_lookup: !settings
-                .binary
-                .as_ref()
-                .and_then(|b| b.ignore_system_version)
-                .unwrap_or_default(),
-            allow_binary_download,
-            pre_release: settings
-                .fetch
-                .as_ref()
-                .and_then(|f| f.pre_release)
-                .unwrap_or(false),
-        };
+        let lsp_binary_options = Self::binary_options(&settings);
 
         cx.spawn(async move |cx| {
             if let Some(mut wait_until_worktree_trust) = wait_until_worktree_trust {
@@ -1817,6 +1823,7 @@ impl LocalLspStore {
                 request_timeout,
                 trigger,
                 logger,
+                is_auto,
                 cx,
             )
             .await
@@ -1834,6 +1841,18 @@ impl LocalLspStore {
         }
     }
 
+    fn formatter_when_prettier_unavailable(is_auto: bool) -> anyhow::Result<Formatter> {
+        if is_auto {
+            Ok(Formatter::LanguageServer(
+                settings::LanguageServerFormatterSpecifier::Current,
+            ))
+        } else {
+            anyhow::bail!(
+                "Prettier is not installed. Install it in this project or set prettier.allow_package_install to true for this language"
+            )
+        }
+    }
+
     async fn apply_formatter(
         formatter: &Formatter,
         lsp_store: &WeakEntity<LspStore>,
@@ -1844,6 +1863,7 @@ impl LocalLspStore {
         request_timeout: Duration,
         trigger: FormatTrigger,
         logger: zlog::Logger,
+        is_auto: bool,
         cx: &mut AsyncApp,
     ) -> anyhow::Result<()> {
         match formatter {
@@ -1901,8 +1921,22 @@ impl LocalLspStore {
                 .await
                 .transpose()?;
                 let Some(mut diff) = diff else {
-                    zlog::trace!(logger => "No changes");
-                    return Ok(());
+                    let fallback = Self::formatter_when_prettier_unavailable(is_auto)?;
+                    zlog::trace!(logger => "Prettier unavailable, using language server formatter");
+                    return Box::pin(Self::apply_formatter(
+                        &fallback,
+                        lsp_store,
+                        buffer,
+                        formatting_transaction_id,
+                        adapters_and_servers,
+                        settings,
+                        request_timeout,
+                        trigger,
+                        logger,
+                        false,
+                        cx,
+                    ))
+                    .await;
                 };
 
                 if let Some(byte_ranges) = byte_ranges {
@@ -5189,6 +5223,7 @@ impl LspStore {
         let Some(prettier_store) = self.as_local().map(|s| s.prettier_store.clone()) else {
             return;
         };
+        let permission_buffer = buffer.downgrade();
         let buffer = buffer.read(cx);
         if buffer.language().is_none() {
             return;
@@ -5206,6 +5241,8 @@ impl LspStore {
                 prettier_store.install_default_prettier(
                     worktree_id,
                     prettier_plugins.into_iter(),
+                    settings.prettier.allow_package_install,
+                    permission_buffer,
                     cx,
                 )
             })
@@ -5717,6 +5754,8 @@ impl LspStore {
                     prettier_store.install_default_prettier(
                         worktree_id,
                         prettier_plugins.iter().map(|s| Arc::from(s.as_str())),
+                        settings.prettier.allow_package_install,
+                        buffer_entity.downgrade(),
                         cx,
                     )
                 })
@@ -16892,6 +16931,42 @@ fn extend_formatting_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_prettier_uses_lsp_only_for_auto() {
+        assert!(matches!(
+            LocalLspStore::formatter_when_prettier_unavailable(true),
+            Ok(Formatter::LanguageServer(
+                settings::LanguageServerFormatterSpecifier::Current
+            ))
+        ));
+        let error = LocalLspStore::formatter_when_prettier_unavailable(false)
+            .expect_err("explicit Prettier needs an installed copy");
+        assert!(error.to_string().contains("Prettier is not installed"));
+        assert!(error.to_string().contains("prettier.allow_package_install"));
+    }
+
+    #[test]
+    fn binary_download_permission_is_independent_of_path_lookup() {
+        let legacy: LspSettings =
+            serde_json::from_str(r#"{"binary":{"ignore_system_version":true}}"#)
+                .expect("parse legacy LSP settings");
+        let options = LocalLspStore::binary_options(&legacy);
+        assert!(!options.allow_path_lookup);
+        assert!(!options.allow_binary_download);
+
+        let opted_in: LspSettings = serde_json::from_str(
+            r#"{"binary":{"ignore_system_version":false},"fetch":{"allow_binary_download":true}}"#,
+        )
+        .expect("parse LSP download opt-in");
+        let options = LocalLspStore::binary_options(&opted_in);
+        assert!(options.allow_path_lookup);
+        assert!(options.allow_binary_download);
+
+        let default_options = LocalLspStore::binary_options(&LspSettings::default());
+        assert!(default_options.allow_path_lookup);
+        assert!(!default_options.allow_binary_download);
+    }
 
     #[test]
     fn should_log_lsp_request_failure_suppresses_known_noise() {

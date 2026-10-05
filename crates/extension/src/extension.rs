@@ -65,6 +65,7 @@ pub trait Extension: Send + Sync + 'static {
         language_name: LanguageName,
         worktree: Arc<dyn WorktreeDelegate>,
         language_server_status_source: EntityId,
+        allow_binary_download: bool,
     ) -> Result<Command>;
 
     async fn language_server_initialization_options(

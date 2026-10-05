@@ -210,6 +210,7 @@ pub struct Client {
     http: Arc<HttpClientWithUrl>,
     cloud_client: Arc<CloudApiClient>,
     telemetry: Arc<Telemetry>,
+    zed_services_enabled: bool,
     credentials_provider: ClientCredentialsProvider,
     state: RwLock<ClientState>,
     handler_set: Mutex<ProtoMessageHandlerSet>,
@@ -560,11 +561,31 @@ impl Client {
         http: Arc<HttpClientWithUrl>,
         cx: &mut App,
     ) -> Arc<Self> {
+        Self::new_with_policy(clock, http, cfg!(any(test, feature = "test-support")), cx)
+    }
+
+    fn new_with_policy(
+        clock: Arc<dyn SystemClock>,
+        http: Arc<HttpClientWithUrl>,
+        zed_services_enabled: bool,
+        cx: &mut App,
+    ) -> Arc<Self> {
+        let cloud_http = if zed_services_enabled {
+            http.clone()
+        } else {
+            // Cloud WebSockets bypass HTTP, so the Cloud URL must fail before connecting too.
+            Arc::new(HttpClientWithUrl::new_url(
+                Arc::new(http_client::BlockedHttpClient::new()),
+                "zed-services-disabled",
+                None,
+            ))
+        };
         Arc::new(Self {
             id: AtomicU64::new(0),
             peer: Peer::new(0),
             telemetry: Telemetry::new(clock, http.clone(), cx),
-            cloud_client: Arc::new(CloudApiClient::new(http.clone())),
+            zed_services_enabled,
+            cloud_client: Arc::new(CloudApiClient::new(cloud_http)),
             http,
             credentials_provider: ClientCredentialsProvider::new(cx),
             state: Default::default(),
@@ -588,7 +609,15 @@ impl Client {
             &ClientSettings::get_global(cx).server_url,
             cx.http_client().proxy().cloned(),
         ));
-        Self::new(clock, http, cx)
+        Self::new_with_policy(clock, http, false, cx)
+    }
+
+    fn check_zed_login(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.zed_services_enabled,
+            "Zed account login is disabled in this build"
+        );
+        Ok(())
     }
 
     pub fn id(&self) -> u64 {
@@ -597,6 +626,10 @@ impl Client {
 
     pub fn http_client(&self) -> Arc<HttpClientWithUrl> {
         self.http.clone()
+    }
+
+    pub fn zed_services_enabled(&self) -> bool {
+        self.zed_services_enabled
     }
 
     pub fn credentials_provider(&self) -> Arc<dyn CredentialsProvider> {
@@ -871,6 +904,9 @@ impl Client {
     }
 
     pub async fn has_credentials(&self, cx: &AsyncApp) -> bool {
+        if !self.zed_services_enabled {
+            return false;
+        }
         self.credentials_provider
             .read_credentials(cx)
             .await
@@ -882,6 +918,7 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> Result<Credentials> {
+        self.check_zed_login()?;
         let is_reauthenticating = if self.status().borrow().is_signed_out() {
             self.set_status(Status::Authenticating, cx);
             false
@@ -1013,6 +1050,7 @@ impl Client {
     /// Runs a single attempt of the cloud websocket connection, returning once the connection
     /// closes (cleanly or otherwise) or fails to establish.
     async fn run_cloud_connection(self: &Arc<Self>, cx: &mut AsyncApp) -> Result<()> {
+        self.check_zed_login()?;
         let connect_task = cx.update({
             let cloud_client = self.cloud_client.clone();
             move |cx| cloud_client.connect(cx)
@@ -1044,6 +1082,7 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> Result<()> {
+        self.check_zed_login()?;
         // Don't try to sign in again if we're already connected to Collab, as it will temporarily disconnect us.
         if self.status().borrow().is_connected() {
             return Ok(());
@@ -1093,6 +1132,9 @@ impl Client {
         try_provider: bool,
         cx: &AsyncApp,
     ) -> ConnectionResult<()> {
+        if let Err(error) = self.check_zed_login() {
+            return ConnectionResult::Result(Err(error));
+        }
         let was_disconnected = match *self.status().borrow() {
             Status::SignedOut | Status::Authenticated => true,
             Status::ConnectionError
@@ -1428,6 +1470,9 @@ impl Client {
     }
 
     pub fn authenticate_with_browser(self: &Arc<Self>, cx: &AsyncApp) -> Task<Result<Credentials>> {
+        if let Err(error) = self.check_zed_login() {
+            return Task::ready(Err(error));
+        }
         let http = self.http.clone();
         let this = self.clone();
         cx.spawn(async move |cx| {
@@ -1610,6 +1655,9 @@ impl Client {
         llm_token: &LlmApiToken,
         organization_id: OrganizationId,
     ) -> Result<String, ClientApiError> {
+        if !self.zed_services_enabled {
+            return Err(ClientApiError::NotSignedIn);
+        }
         let system_id = self.telemetry().system_id().map(|x| x.to_string());
         let cloud_client = self.cloud_client();
         let result = llm_token
@@ -1631,6 +1679,7 @@ impl Client {
         organization_id: OrganizationId,
         build_request: impl Fn(&str) -> Result<http_client::Request<http_client::AsyncBody>>,
     ) -> Result<http_client::Response<http_client::AsyncBody>> {
+        self.check_zed_login()?;
         let http_client = self.http_client();
         let token = self
             .cached_llm_token(llm_token, organization_id.clone())
@@ -1651,6 +1700,9 @@ impl Client {
         llm_token: &LlmApiToken,
         organization_id: OrganizationId,
     ) -> Result<String, ClientApiError> {
+        if !self.zed_services_enabled {
+            return Err(ClientApiError::NotSignedIn);
+        }
         let system_id = self.telemetry().system_id().map(|x| x.to_string());
         let cloud_client = self.cloud_client();
         let result = llm_token
@@ -1667,6 +1719,9 @@ impl Client {
         llm_token: &LlmApiToken,
         organization_id: OrganizationId,
     ) -> Result<String, ClientApiError> {
+        if !self.zed_services_enabled {
+            return Err(ClientApiError::NotSignedIn);
+        }
         let system_id = self.telemetry().system_id().map(|x| x.to_string());
         let cloud_client = self.cloud_client();
         let result = llm_token
@@ -1704,6 +1759,9 @@ impl Client {
     }
 
     pub fn reconnect(self: &Arc<Self>, cx: &AsyncApp) {
+        if !self.zed_services_enabled {
+            return;
+        }
         self.peer.teardown();
         self.set_status(Status::ConnectionLost, cx);
     }
@@ -2013,6 +2071,116 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    async fn test_production_client_blocks_zed_login_without_blocking_http(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        let calls = Arc::new(Mutex::new(0));
+        let http = FakeHttpClient::create({
+            let calls = calls.clone();
+            move |_| {
+                *calls.lock() += 1;
+                async move {
+                    Ok(http_client::Response::builder()
+                        .status(200)
+                        .body("".into())
+                        .unwrap())
+                }
+            }
+        });
+        let client = cx.update(|cx| {
+            cx.set_http_client(http);
+            Client::production(cx)
+        });
+        client.state.write().credentials = Some(Credentials {
+            user_id: 42,
+            access_token: "previous-token".into(),
+        });
+        assert!(!client.zed_services_enabled());
+
+        let error = client.sign_in(true, &cx.to_async()).await.unwrap_err();
+        assert!(error.to_string().contains("Zed account login is disabled"));
+        let error = client
+            .sign_in_with_optional_connect(true, &cx.to_async())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Zed account login is disabled"));
+        let error = client
+            .connect(true, &cx.to_async())
+            .await
+            .into_response()
+            .unwrap_err();
+        assert!(error.to_string().contains("Zed account login is disabled"));
+        let error = client
+            .authenticate_with_browser(&cx.to_async())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Zed account login is disabled"));
+        assert!(!client.has_credentials(&cx.to_async()).await);
+        client.reconnect(&cx.to_async());
+        assert_eq!(*client.status().borrow(), Status::SignedOut);
+
+        client
+            .cloud_client()
+            .set_credentials(42, "previous-token".into());
+        let token = LlmApiToken::default();
+        let organization_id = OrganizationId("test".into());
+        assert!(matches!(
+            client
+                .cached_llm_token(&token, organization_id.clone())
+                .await,
+            Err(ClientApiError::NotSignedIn)
+        ));
+        assert!(matches!(
+            client
+                .refresh_llm_token(&token, organization_id.clone())
+                .await,
+            Err(ClientApiError::NotSignedIn)
+        ));
+        assert!(matches!(
+            client
+                .clear_and_refresh_llm_token(&token, organization_id.clone())
+                .await,
+            Err(ClientApiError::NotSignedIn)
+        ));
+        let error = client
+            .authenticated_llm_request(&token, organization_id, |_| {
+                panic!("disabled account must not build an LLM request")
+            })
+            .await
+            .err()
+            .expect("disabled account must reject LLM requests");
+        assert!(error.to_string().contains("Zed account login is disabled"));
+        assert!(matches!(
+            client.cloud_client().get_authenticated_user(None).await,
+            Err(ClientApiError::RequestBuildFailed(_))
+        ));
+        assert!(cx.update(|cx| client.cloud_client().connect(cx)).is_err());
+        assert!(matches!(
+            client
+                .cloud_client()
+                .send_authenticated_json_request::<serde_json::Value>(
+                    http_client::Request::builder().uri("http://test.example/cloud-request"),
+                    http_client::AsyncBody::default(),
+                )
+                .await,
+            Err(ClientApiError::ConnectionFailed { .. })
+        ));
+        assert_eq!(*calls.lock(), 0);
+
+        client
+            .http_client()
+            .get(
+                "http://test.example/manual-install",
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(*calls.lock(), 1);
+    }
+
     #[gpui::test(iterations = 10)]
     async fn test_reconnection(cx: &mut TestAppContext) {
         init_test(cx);
@@ -2024,6 +2192,7 @@ mod tests {
                 cx,
             )
         });
+        assert!(client.zed_services_enabled());
         let server = FakeServer::for_client(user_id, &client, cx).await;
         let mut status = client.status();
         assert!(matches!(

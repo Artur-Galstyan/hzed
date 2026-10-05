@@ -217,12 +217,6 @@ impl AgentServer for CustomAgentServer {
                 .unwrap_or_default()
         });
 
-        if is_registry_agent {
-            if let Some(registry_store) = project::AgentRegistryStore::try_global(cx) {
-                registry_store.update(cx, |store, cx| store.refresh_if_stale(cx));
-            }
-        }
-
         let mut extra_env = load_proxy_env(cx);
         if delegate.store.read(cx).no_browser() {
             extra_env.insert("NO_BROWSER".to_owned(), "1".to_owned());

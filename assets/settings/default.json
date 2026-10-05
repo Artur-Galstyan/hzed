@@ -1197,14 +1197,7 @@
     // Content will be centered within the panel.
     "max_content_width": 850,
     // The default model to use when creating new threads.
-    "default_model": {
-      // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
-      "enable_thinking": false,
-    },
+    "default_model": null,
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
     // from the last entry in this list that matches the model's provider and name. In each entry, both provider
     // and model are optional, so that you can specify parameters for either one.
@@ -1698,9 +1691,9 @@
   // Control what info is collected by Zed.
   "telemetry": {
     // Send debug info like crash reports.
-    "diagnostics": true,
+    "diagnostics": false,
     // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
@@ -1709,9 +1702,8 @@
   //
   // Default: false
   "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
-  "auto_update": true,
+  // Automatic update checks are disabled. Use Check for Updates to check manually.
+  "auto_update": false,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:
@@ -1906,7 +1898,7 @@
   "load_direnv": "direct",
   "edit_predictions": {
     // Which edit prediction provider to use.
-    "provider": "zed",
+    "provider": "none",
     // Disable edit predictions for files matching these glob patterns.
     //
     // Use `"..."` to add patterns without repeating Zed's defaults. In project
@@ -2321,24 +2313,20 @@
   //
   // Note: changing this setting currently requires restarting Zed.
   "node": {
-    // By default, Zed will look for `node` and `npm` on your `$PATH`, and use the
-    // existing executables if their version is recent enough. Set this to `true`
-    // to prevent this, and force Zed to always download and install its own
-    // version of Node.
+    // Look for `node` and `npm` on PATH unless this is true.
+    // This setting does not grant permission to download Node.
     "ignore_system_version": false,
+    // Let Zed download Node when a suitable local binary is unavailable.
+    // Also set this to true if `ignore_system_version` is true and you need managed Node.
+    "allow_binary_download": false,
     // You can also specify alternative paths to Node and NPM. If you specify
     // `path`, but not `npm_path`, Zed will assume that `npm` is located at
     // `${path}/../npm`.
     "path": null,
     "npm_path": null,
   },
-  // The extensions that Zed should automatically install on startup.
-  //
-  // If you don't want any of these extensions, add this field to your settings
-  // and change the value to `false`.
-  "auto_install_extensions": {
-    "html": true,
-  },
+  // Startup extension installation is disabled. Install extensions in the Extensions UI.
+  "auto_install_extensions": {},
   // Whether to suggest installing extensions based on the files you open.
   "suggest_extensions": true,
   // The capabilities granted to extensions.
@@ -2718,6 +2706,9 @@
   "prettier": {
     // Enables or disables formatting with Prettier for any given language.
     "allowed": false,
+    // Allow Zed to install default Prettier and plugins with npm for this language.
+    // Without this opt-in, project-local and cached Prettier still work.
+    "allow_package_install": false,
     // Forces Prettier integration to use a specific parser name when formatting files with the language.
     "plugins": [],
     // Default Prettier options, in the format as in package.json section for Prettier.
@@ -2737,6 +2728,8 @@
   // LSP Specific settings.
   "lsp": {
     // Specify the LSP name as a key here.
+    // Downloads require an explicit opt-in per server:
+    // "rust-analyzer": { "fetch": { "allow_binary_download": true } },
     // "rust-analyzer": {
     //     // A special flag for rust-analyzer integration, to use server-provided tasks
     //     enable_lsp_tasks": true,

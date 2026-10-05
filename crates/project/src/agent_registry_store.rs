@@ -131,10 +131,8 @@ pub struct AgentRegistryStore {
 impl AgentRegistryStore {
     /// Initialize the global AgentRegistryStore.
     ///
-    /// This loads the cached registry from disk. If the cache is empty but there
-    /// are registry agents configured in settings, it will trigger a network fetch.
-    /// Otherwise, call `refresh()` explicitly when you need fresh data
-    /// (e.g., when opening the Agent Registry page).
+    /// This loads the cached registry from disk. Call `refresh()` when you need
+    /// fresh data (e.g., when opening the Agent Registry page).
     pub fn init_global(
         cx: &mut App,
         fs: Arc<dyn Fs>,
@@ -146,12 +144,6 @@ impl AgentRegistryStore {
 
         let store = cx.new(|cx| Self::new(fs, http_client, cx));
         cx.set_global(GlobalAgentRegistryStore(store.clone()));
-
-        store.update(cx, |store, cx| {
-            if store.agents.is_empty() {
-                store.refresh(cx);
-            }
-        });
 
         store
     }
@@ -682,4 +674,43 @@ struct RegistryNpxDistribution {
     args: Vec<String>,
     #[serde(default)]
     env: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use http_client::{FakeHttpClient, Response};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[gpui::test]
+    fn test_registry_waits_for_explicit_refresh(cx: &mut TestAppContext) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let store = cx.update(|cx| {
+            settings::init(cx);
+            AgentRegistryStore::init_global(
+                cx,
+                fs::FakeFs::new(cx.background_executor().clone()),
+                FakeHttpClient::create({
+                    let requests = requests.clone();
+                    move |_| {
+                        let requests = requests.clone();
+                        async move {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            Ok(Response::builder()
+                                .status(200)
+                                .body(r#"{"version":"1","agents":[]}"#.into())
+                                .unwrap())
+                        }
+                    }
+                }),
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
 }

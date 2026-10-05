@@ -116,16 +116,20 @@ impl PrettierStore {
         }
 
         let node = self.node.clone();
+        let settings = LanguageSettings::for_buffer(buffer, cx);
+        let allow_package_install = settings.prettier.allow_package_install;
+        let plugins = settings.prettier.plugins.clone();
 
         match File::from_dyn(buffer_file).map(|file| (file.worktree_id(cx), file.abs_path(cx))) {
             Some((worktree_id, buffer_path)) => {
                 let fs = Arc::clone(&self.fs);
                 let installed_prettiers = self.prettier_instances.keys().cloned().collect();
                 cx.spawn(async move |lsp_store, cx| {
+                    let locate_fs = Arc::clone(&fs);
                     match cx
                         .background_spawn(async move {
                             Prettier::locate_prettier_installation(
-                                fs.as_ref(),
+                                locate_fs.as_ref(),
                                 &installed_prettiers,
                                 &buffer_path,
                             )
@@ -135,6 +139,18 @@ impl PrettierStore {
                     {
                         Ok(ControlFlow::Break(())) => None,
                         Ok(ControlFlow::Continue(None)) => {
+                            let cached = cached_default_prettier_available(
+                                fs.as_ref(),
+                                default_prettier_dir(),
+                                &plugins,
+                            )
+                            .await;
+                            if !allow_package_install
+                                && !cached
+                                && !cfg!(any(test, feature = "test-support"))
+                            {
+                                return None;
+                            }
                             let default_task = lsp_store
                                 .update(cx, |lsp_store, cx| {
                                     lsp_store
@@ -145,6 +161,7 @@ impl PrettierStore {
                                     lsp_store.default_prettier.prettier_task(
                                         &node,
                                         Some(worktree_id),
+                                        cached,
                                         cx,
                                     )
                                 })
@@ -211,8 +228,29 @@ impl PrettierStore {
                 })
             }
             None => {
-                let new_task = self.default_prettier.prettier_task(&node, None, cx);
-                cx.spawn(async move |_, _| Some((None, new_task?.log_err().await?)))
+                let fs = Arc::clone(&self.fs);
+                cx.spawn(async move |store, cx| {
+                    let cached = cached_default_prettier_available(
+                        fs.as_ref(),
+                        default_prettier_dir(),
+                        &plugins,
+                    )
+                    .await;
+                    if !allow_package_install
+                        && !cached
+                        && !cfg!(any(test, feature = "test-support"))
+                    {
+                        return None;
+                    }
+                    let task = store
+                        .update(cx, |store, cx| {
+                            store
+                                .default_prettier
+                                .prettier_task(&node, None, cached, cx)
+                        })
+                        .ok()??;
+                    Some((None, task.log_err().await?))
+                })
             }
         }
     }
@@ -291,6 +329,11 @@ impl PrettierStore {
                 prettier_store.languages.next_language_server_id()
             })?;
 
+            let fs =
+                prettier_store.read_with(cx, |prettier_store, _| Arc::clone(&prettier_store.fs))?;
+            if should_write_prettier_server_file(fs.as_ref(), default_prettier_dir()).await {
+                save_prettier_server_file(fs.as_ref(), default_prettier_dir()).await?;
+            }
             let new_prettier = Prettier::start(
                 new_server_id,
                 prettier_dir,
@@ -540,6 +583,8 @@ impl PrettierStore {
         &mut self,
         worktree: Option<WorktreeId>,
         plugins: impl Iterator<Item = Arc<str>>,
+        allow_package_install: bool,
+        permission_buffer: WeakEntity<Buffer>,
         cx: &mut Context<Self>,
     ) {
         if cfg!(any(test, feature = "test-support")) {
@@ -548,6 +593,9 @@ impl PrettierStore {
                 attempt: 0,
                 prettier: None,
             });
+            return;
+        }
+        if !allow_package_install {
             return;
         }
 
@@ -613,9 +661,16 @@ impl PrettierStore {
                     ControlFlow::Break(()) => return Ok(()),
                     ControlFlow::Continue(prettier_path) => {
                         if prettier_path.is_some() {
-                            new_plugins.clear();
+                            if should_write_prettier_server_file(fs.as_ref(), default_prettier_dir()).await {
+                                save_prettier_server_file(fs.as_ref(), default_prettier_dir()).await.map_err(Arc::new)?;
+                            }
+                            prettier_store.update(cx, |prettier_store, _| {
+                                if let PrettierInstallation::NotInstalled { installation_task, .. } = &mut prettier_store.default_prettier.prettier {
+                                    *installation_task = None;
+                                }
+                            })?;
+                            return Ok(());
                         }
-                        let mut needs_install = should_write_prettier_server_file(fs.as_ref()).await;
                         if let Some(previous_installation_task) = previous_installation_task
                             && let Err(e) = previous_installation_task.await {
                                 log::error!("Failed to install default prettier: {e:#}");
@@ -624,7 +679,6 @@ impl PrettierStore {
                                         *attempts += 1;
                                         new_plugins.extend(not_installed_plugins.iter().cloned());
                                         installation_attempt = *attempts;
-                                        needs_install = true;
                                     };
                                 })?;
                             };
@@ -649,15 +703,30 @@ impl PrettierStore {
                                 });
                                 not_installed_plugins.extend(new_plugins.iter().cloned());
                             }
-                            needs_install |= !new_plugins.is_empty();
                         })?;
-                        if needs_install {
+                        let cached = cached_default_prettier_available(
+                            fs.as_ref(),
+                            default_prettier_dir(),
+                            &new_plugins.iter().map(|plugin| plugin.to_string()).collect(),
+                        ).await;
+                        if !cached {
+                            let still_allowed = permission_buffer.read_with(cx, |buffer, cx| {
+                                LanguageSettings::for_buffer(buffer, cx).prettier.allow_package_install
+                            }).unwrap_or(false);
+                            if !still_allowed {
+                                prettier_store.update(cx, |prettier_store, _| {
+                                    if let PrettierInstallation::NotInstalled { installation_task, .. } = &mut prettier_store.default_prettier.prettier {
+                                        *installation_task = None;
+                                    }
+                                })?;
+                                return Ok(());
+                            }
                             log::info!("Initializing default prettier with plugins {new_plugins:?}");
                             let installed_plugins = new_plugins.clone();
                             cx.background_spawn(async move {
-                                install_prettier_packages(fs.as_ref(), new_plugins, node).await?;
+                                install_prettier_packages(fs.as_ref(), new_plugins, node, allow_package_install).await?;
                                 // Save the server file last, so the reinstall need could be determined by the absence of the file.
-                                save_prettier_server_file(fs.as_ref()).await?;
+                                save_prettier_server_file(fs.as_ref(), default_prettier_dir()).await?;
                                 anyhow::Ok(())
                             })
                                 .await
@@ -675,6 +744,9 @@ impl PrettierStore {
                                     .extend(installed_plugins);
                             })?;
                         } else {
+                            if should_write_prettier_server_file(fs.as_ref(), default_prettier_dir()).await {
+                                save_prettier_server_file(fs.as_ref(), default_prettier_dir()).await.map_err(Arc::new)?;
+                            }
                             prettier_store.update(cx, |prettier_store, _| {
                                 if let PrettierInstallation::NotInstalled { .. } = &mut prettier_store.default_prettier.prettier {
                                     prettier_store.default_prettier.prettier =
@@ -682,6 +754,7 @@ impl PrettierStore {
                                             attempt: 0,
                                             prettier: None,
                                         });
+                                    prettier_store.default_prettier.installed_plugins.extend(new_plugins);
                                 }
                             })?;
                         }
@@ -836,9 +909,28 @@ impl DefaultPrettier {
         &mut self,
         node: &NodeRuntime,
         worktree_id: Option<WorktreeId>,
+        cached: bool,
         cx: &mut Context<PrettierStore>,
     ) -> Option<Task<anyhow::Result<PrettierTask>>> {
+        if cached
+            && matches!(
+                self.prettier,
+                PrettierInstallation::NotInstalled {
+                    installation_task: None,
+                    ..
+                }
+            )
+        {
+            self.prettier = PrettierInstallation::Installed(PrettierInstance {
+                attempt: 0,
+                prettier: None,
+            });
+        }
         match &mut self.prettier {
+            PrettierInstallation::NotInstalled {
+                installation_task: None,
+                ..
+            } => None,
             PrettierInstallation::NotInstalled { .. } => Some(
                 PrettierStore::start_default_prettier(node.clone(), worktree_id, cx),
             ),
@@ -904,7 +996,12 @@ async fn install_prettier_packages(
     fs: &dyn Fs,
     plugins_to_install: HashSet<Arc<str>>,
     node: NodeRuntime,
+    allow_package_install: bool,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        allow_package_install,
+        "Set prettier.allow_package_install to true to allow npm installs"
+    );
     let packages_to_install = plugins_to_install
         .iter()
         .map(|package_name| package_name.to_string())
@@ -936,8 +1033,34 @@ async fn install_prettier_packages(
     anyhow::Ok(())
 }
 
-async fn save_prettier_server_file(fs: &dyn Fs) -> anyhow::Result<()> {
-    let prettier_wrapper_path = default_prettier_dir().join(prettier::PRETTIER_SERVER_FILE);
+async fn cached_default_prettier_available(
+    fs: &dyn Fs,
+    directory: &Path,
+    plugins: &HashSet<String>,
+) -> bool {
+    let node_modules = directory.join("node_modules");
+    if !fs
+        .is_file(&node_modules.join("prettier/package.json"))
+        .await
+    {
+        return false;
+    }
+    for plugin in plugins {
+        if !fs
+            .is_file(&node_modules.join(plugin).join("package.json"))
+            .await
+        {
+            return false;
+        }
+    }
+    true
+}
+
+async fn save_prettier_server_file(fs: &dyn Fs, directory: &Path) -> anyhow::Result<()> {
+    fs.create_dir(directory)
+        .await
+        .with_context(|| format!("creating default prettier dir {directory:?}"))?;
+    let prettier_wrapper_path = directory.join(prettier::PRETTIER_SERVER_FILE);
     fs.save(
         &prettier_wrapper_path,
         &text::Rope::from(prettier::PRETTIER_SERVER_JS),
@@ -953,8 +1076,8 @@ async fn save_prettier_server_file(fs: &dyn Fs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn should_write_prettier_server_file(fs: &dyn Fs) -> bool {
-    let prettier_wrapper_path = default_prettier_dir().join(prettier::PRETTIER_SERVER_FILE);
+async fn should_write_prettier_server_file(fs: &dyn Fs, directory: &Path) -> bool {
+    let prettier_wrapper_path = directory.join(prettier::PRETTIER_SERVER_FILE);
     if !fs.is_file(&prettier_wrapper_path).await {
         return true;
     }
@@ -962,4 +1085,78 @@ async fn should_write_prettier_server_file(fs: &dyn Fs) -> bool {
         return true;
     };
     prettier_server_file_contents != prettier::PRETTIER_SERVER_JS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use util::path;
+
+    #[gpui::test]
+    async fn cached_prettier_and_wrapper_work_without_npm(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        let directory = Path::new(path!("/cached-prettier"));
+        fs.insert_tree(
+            directory,
+            serde_json::json!({
+                "node_modules": {
+                    "prettier": { "package.json": "{}" },
+                    "@prettier": { "plugin-xml": { "package.json": "{}" } }
+                }
+            }),
+        )
+        .await;
+        let plugins = ["@prettier/plugin-xml".to_string()].into_iter().collect();
+        assert!(cached_default_prettier_available(fs.as_ref(), directory, &plugins).await);
+        assert!(
+            !cached_default_prettier_available(
+                fs.as_ref(),
+                directory,
+                &["missing".to_string()].into_iter().collect()
+            )
+            .await
+        );
+        assert!(should_write_prettier_server_file(fs.as_ref(), directory).await);
+        save_prettier_server_file(fs.as_ref(), directory)
+            .await
+            .expect("write local wrapper");
+        assert!(!should_write_prettier_server_file(fs.as_ref(), directory).await);
+
+        let empty_directory = Path::new(path!("/empty-prettier"));
+        assert!(
+            fs.metadata(empty_directory)
+                .await
+                .expect("check empty directory")
+                .is_none()
+        );
+        save_prettier_server_file(fs.as_ref(), empty_directory)
+            .await
+            .expect("write wrapper without a parent directory");
+        assert!(
+            fs.is_file(&empty_directory.join(prettier::PRETTIER_SERVER_FILE))
+                .await
+        );
+    }
+
+    #[gpui::test]
+    async fn npm_requires_prettier_install_permission(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        let error = install_prettier_packages(
+            fs.as_ref(),
+            HashSet::default(),
+            NodeRuntime::unavailable(),
+            false,
+        )
+        .await
+        .expect_err("npm must not run without Prettier consent");
+        assert!(error.to_string().contains("prettier.allow_package_install"));
+        assert!(
+            fs.metadata(default_prettier_dir())
+                .await
+                .expect("check local cache")
+                .is_none()
+        );
+    }
 }

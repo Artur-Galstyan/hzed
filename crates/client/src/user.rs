@@ -713,6 +713,9 @@ impl UserStore {
         let Some(client) = self.client.upgrade() else {
             return Task::ready(Ok(()));
         };
+        if !client.zed_services_enabled() {
+            return Task::ready(Ok(()));
+        }
         let Some(system_id) = client.telemetry().system_id().map(|id| id.to_string()) else {
             // Without a system ID we have no addressable target row on the
             // server, so the selection stays purely session-local.

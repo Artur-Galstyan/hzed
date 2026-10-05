@@ -1,9 +1,7 @@
 use crate::{
     DebugEvent, EditPredictionFinishedDebugEvent, EditPredictionId, EditPredictionModelInput,
-    EditPredictionStartedDebugEvent, EditPredictionStore,
-    open_ai_response::text_from_response,
-    prediction::{EditPredictionInputs, EditPredictionResult},
-    zeta::compute_edits,
+    EditPredictionStartedDebugEvent, EditPredictionStore, open_ai_response::text_from_response,
+    prediction::EditPredictionResult, zeta::compute_edits,
 };
 use anyhow::{Context as _, Result};
 use cloud_llm_client::EditPredictionRejectReason;
@@ -52,7 +50,6 @@ impl Mercury {
             events,
             related_files,
             debug_tx,
-            trigger,
             ..
         }: EditPredictionModelInput,
         credentials_provider: Arc<dyn CredentialsProvider>,
@@ -72,7 +69,6 @@ impl Mercury {
 
         let http_client = cx.http_client();
         let cursor_point = position.to_point(&snapshot);
-        let request_start = cx.background_executor().now();
         let active_buffer = buffer.clone();
 
         let result = cx.background_spawn(async move {
@@ -230,7 +226,7 @@ impl Mercury {
 
             let editable_range = snapshot.anchor_range_inside(editable_offset_range);
 
-            anyhow::Ok((id, edits, snapshot, inputs, editable_range))
+            anyhow::Ok((id, edits, snapshot, editable_range))
         });
 
         cx.spawn(async move |ep_store, cx| {
@@ -248,7 +244,7 @@ impl Mercury {
                 cx.notify();
             })?;
 
-            let (id, edits, old_snapshot, inputs, editable_range) = result?;
+            let (id, edits, old_snapshot, editable_range) = result?;
             anyhow::Ok(Some(
                 EditPredictionResult::new(
                     EditPredictionId(id.into()),
@@ -257,10 +253,6 @@ impl Mercury {
                     edits.into(),
                     None,
                     Some(editable_range),
-                    EditPredictionInputs::V2(inputs),
-                    None,
-                    trigger,
-                    cx.background_executor().now() - request_start,
                     cx,
                 )
                 .await,

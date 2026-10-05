@@ -312,6 +312,9 @@ impl http_client::Host for WasmState {
         &mut self,
         request: http_client::HttpRequest,
     ) -> wasmtime::Result<Result<http_client::HttpResponse, String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let url = &request.url;
             let request = convert_request(&request)?;
@@ -330,10 +333,12 @@ impl http_client::Host for WasmState {
         &mut self,
         request: http_client::HttpRequest,
     ) -> wasmtime::Result<Result<Resource<ExtensionHttpResponseStream>, String>> {
-        let request = convert_request(&request).into_wasmtime_result()?;
-        let response = self.host.http_client.send(request);
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
-            let response = response.await?;
+            let request = convert_request(&request)?;
+            let response = self.host.http_client.send(request).await?;
             let stream = Arc::new(Mutex::new(response));
             let resource = self.table.push(stream)?;
             Ok(resource)
@@ -522,6 +527,9 @@ impl ExtensionImports for WasmState {
         path: String,
         file_type: DownloadedFileType,
     ) -> wasmtime::Result<Result<(), String>> {
+        if let Err(error) = self.allow_language_server_network() {
+            return Ok(Err(error.to_string()));
+        }
         maybe!(async {
             let path = PathBuf::from(path);
             let extension_work_dir = self.host.work_dir.join(self.manifest.id.as_ref());

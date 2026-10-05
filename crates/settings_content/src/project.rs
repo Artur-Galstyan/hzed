@@ -323,6 +323,10 @@ pub struct BinarySettings {
 pub struct FetchSettings {
     // Whether to consider pre-releases for fetching
     pub pre_release: Option<bool>,
+    /// Allow Zed to check for and download this language server when no local binary is available.
+    ///
+    /// Default: false. `binary.ignore_system_version` does not enable downloads.
+    pub allow_binary_download: Option<bool>,
 }
 
 /// Common language server settings.
@@ -963,8 +967,12 @@ pub struct NodeBinarySettings {
     pub path: Option<String>,
     /// The path to the npm binary Zed should use (defaults to `.path/../npm`).
     pub npm_path: Option<String>,
-    /// If enabled, Zed will download its own copy of Node.
+    /// If enabled, Zed will not look for Node on PATH.
     pub ignore_system_version: Option<bool>,
+    /// Allow Zed to download its own copy of Node if needed.
+    ///
+    /// Default: false. `ignore_system_version` does not enable downloads.
+    pub allow_binary_download: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
@@ -1367,5 +1375,35 @@ mod tests {
             panic!("expected Stdio variant, got {settings:?}");
         };
         assert_eq!(command.args, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn download_settings_require_explicit_opt_in() {
+        let node: NodeBinarySettings = serde_json::from_str(r#"{"ignore_system_version":true}"#)
+            .expect("parse legacy Node settings");
+        assert_eq!(node.ignore_system_version, Some(true));
+        assert_eq!(node.allow_binary_download, None);
+
+        let server: LspSettings =
+            serde_json::from_str(r#"{"binary":{"ignore_system_version":true}}"#)
+                .expect("parse legacy LSP settings");
+        assert_eq!(
+            server
+                .binary
+                .and_then(|binary| binary.ignore_system_version),
+            Some(true)
+        );
+        assert_eq!(server.fetch, None);
+
+        let node: NodeBinarySettings = serde_json::from_str(r#"{"allow_binary_download":true}"#)
+            .expect("parse Node download opt-in");
+        assert_eq!(node.allow_binary_download, Some(true));
+        let server: LspSettings =
+            serde_json::from_str(r#"{"fetch":{"allow_binary_download":true}}"#)
+                .expect("parse LSP download opt-in");
+        assert_eq!(
+            server.fetch.and_then(|fetch| fetch.allow_binary_download),
+            Some(true)
+        );
     }
 }

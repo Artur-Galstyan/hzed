@@ -14,6 +14,7 @@ use gpui::WeakEntity;
 use gpui::{App, AsyncApp, Entity, Global, Task, prelude::*};
 use http_client::HttpRequestExt;
 use http_client::{AsyncBody, HttpClient, Method, Request as HttpRequest};
+use language_model::AuthenticateError;
 use serde::{Deserialize, Serialize};
 
 pub use copilot_oauth::DeviceFlow;
@@ -585,8 +586,7 @@ impl CopilotChat {
     ) -> Self {
         let env_token = oauth_token_from_env();
 
-        // Load a previously-stored token (or the one from the environment) and
-        // fetch models if we end up authenticated.
+        // Load the token locally; model discovery waits for an explicit request.
         cx.spawn(async move |this, cx| {
             let (env_token, credentials_provider, configuration) =
                 this.read_with(cx, |this, _| {
@@ -602,9 +602,11 @@ impl CopilotChat {
                 None => load_stored_token(&credentials_provider, &configuration, cx).await,
             };
 
-            let configuration_is_current = this.update(cx, |this, cx| {
-                if this.configuration != configuration {
-                    return false;
+            this.update(cx, |this, cx| {
+                if this.configuration != configuration
+                    || !matches!(&this.status, CopilotChatStatus::Starting)
+                {
+                    return;
                 }
                 this.oauth_token = token.clone();
                 this.status = if token.is_some() {
@@ -613,12 +615,7 @@ impl CopilotChat {
                     CopilotChatStatus::SignedOut
                 };
                 cx.notify();
-                true
             })?;
-
-            if configuration_is_current && token.is_some() {
-                Self::update_models(&this, cx).await?;
-            }
             anyhow::Ok(())
         })
         .detach();
@@ -747,6 +744,39 @@ impl CopilotChat {
             cx.notify();
         })?;
         anyhow::Ok(())
+    }
+
+    pub fn refresh_models(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<(), AuthenticateError>> {
+        let credentials_provider = self.credentials_provider.clone();
+        let configuration = self.configuration.clone();
+        cx.spawn(async move |this, cx| {
+            if this.read_with(cx, |this, _| this.oauth_token.is_none())? {
+                let token = load_stored_token(&credentials_provider, &configuration, cx).await;
+                this.update(cx, |this, cx| {
+                    if this.configuration == configuration
+                        && this.oauth_token.is_none()
+                        && !matches!(&this.status, CopilotChatStatus::SigningIn { .. })
+                    {
+                        this.oauth_token = token;
+                        this.status = if this.oauth_token.is_some() {
+                            CopilotChatStatus::Authorized
+                        } else {
+                            CopilotChatStatus::SignedOut
+                        };
+                        cx.notify();
+                    }
+                })?;
+            }
+            if this.read_with(cx, |this, _| this.oauth_token.is_none())? {
+                return Err(AuthenticateError::CredentialsNotFound);
+            }
+            Self::update_models(&this, cx)
+                .await
+                .map_err(AuthenticateError::Other)
+        })
     }
 
     pub fn is_authenticated(&self) -> bool {
@@ -903,9 +933,11 @@ impl CopilotChat {
             let configuration = self.configuration.clone();
             cx.spawn(async move |this, cx| {
                 let token = load_stored_token(&credentials_provider, &configuration, cx).await;
-                let configuration_is_current = this.update(cx, |this, cx| {
-                    if this.configuration != configuration {
-                        return false;
+                this.update(cx, |this, cx| {
+                    if this.configuration != configuration
+                        || !matches!(&this.status, CopilotChatStatus::Starting)
+                    {
+                        return;
                     }
                     this.oauth_token = token.clone();
                     this.status = if token.is_some() {
@@ -914,17 +946,7 @@ impl CopilotChat {
                         CopilotChatStatus::SignedOut
                     };
                     cx.notify();
-                    true
                 })?;
-
-                if configuration_is_current && token.is_some() {
-                    if let Err(error) = Self::update_models(&this, cx).await {
-                        this.update(cx, |this, cx| {
-                            this.status = CopilotChatStatus::Error(error.to_string().into());
-                            cx.notify();
-                        })?;
-                    }
-                }
                 Ok::<_, anyhow::Error>(())
             })
             .detach_and_log_err(cx);

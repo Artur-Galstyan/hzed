@@ -4,12 +4,12 @@ use language::{
     BufferSnapshot, OffsetRangeExt as _, Point, ToOffset as _, ToPoint as _,
     language_settings::all_language_settings,
 };
-use std::{fmt::Write as _, ops::Range, path::Path, sync::Arc, time::Instant};
-use zeta_prompt::{RelatedFile, Zeta2PromptInput, filter_redundant_excerpts};
+use std::{fmt::Write as _, ops::Range, path::Path, sync::Arc};
+use zeta_prompt::{RelatedFile, filter_redundant_excerpts};
 
 use crate::{
-    DebugEvent, EditPredictionFinishedDebugEvent, EditPredictionId, EditPredictionInputs,
-    EditPredictionModelInput, EditPredictionResult, EditPredictionStartedDebugEvent, StoredEvent,
+    DebugEvent, EditPredictionFinishedDebugEvent, EditPredictionId, EditPredictionModelInput,
+    EditPredictionResult, EditPredictionStartedDebugEvent, StoredEvent,
     cursor_excerpt::fixed_line_window_around_cursor,
     open_ai_compatible::{self, load_open_ai_compatible_api_key_if_needed},
     zeta,
@@ -63,16 +63,13 @@ pub fn request_prediction(
 
     let api_key = load_open_ai_compatible_api_key_if_needed(provider, cx);
     let http_client = cx.http_client();
-    let buffer_snapshotted_at = Instant::now();
 
     let EditPredictionModelInput {
         buffer,
         snapshot,
         position,
-        events,
         stored_events,
         related_files,
-        trigger,
         debug_tx,
         ..
     } = input;
@@ -95,7 +92,7 @@ pub fn request_prediction(
         window_range.clone(),
         &snapshot,
         &stored_events,
-        filtered_related_files.clone(),
+        filtered_related_files,
     );
     if let Err(error) = validate_prompt_input(&prompt_input) {
         return Task::ready(Err(error));
@@ -117,26 +114,9 @@ pub fn request_prediction(
     let window_offset_range = window_range.to_offset(&snapshot);
     let window_start_offset = window_offset_range.start;
     let editable_range = snapshot.anchor_range_inside(window_offset_range);
-    let cursor_offset_in_window = position
-        .to_offset(&snapshot)
-        .saturating_sub(window_start_offset);
-    let zeta_input = Zeta2PromptInput {
-        events,
-        related_files: Some(filtered_related_files),
-        active_buffer_diagnostics: Vec::new(),
-        cursor_path: file_path,
-        cursor_excerpt: prompt_input.current_window.clone().into(),
-        cursor_offset_in_excerpt: cursor_offset_in_window,
-        excerpt_start_row: Some(window_range.start.row),
-        excerpt_ranges: Default::default(),
-        syntax_ranges: None,
-        in_open_source_repo: false,
-        can_collect_data: false,
-        repo_url: None,
-    };
 
     let current_window = prompt_input.current_window;
-    let request_task: Task<Result<(String, String, Instant)>> = cx.background_spawn(async move {
+    let request_task: Task<Result<(String, String)>> = cx.background_spawn(async move {
         let (response_text, request_id) = open_ai_compatible::send_custom_server_request(
             provider,
             &custom_settings,
@@ -148,16 +128,11 @@ pub fn request_prediction(
         )
         .await
         .context("sweep prompt request failed")?;
-        let response_received_at = Instant::now();
-        Ok((
-            request_id,
-            clean_response_text(&response_text),
-            response_received_at,
-        ))
+        Ok((request_id, clean_response_text(&response_text)))
     });
 
     cx.spawn(async move |cx| {
-        let (request_id, response_text, response_received_at) = request_task.await?;
+        let (request_id, response_text) = request_task.await?;
 
         if let Some(debug_tx) = &debug_tx {
             debug_tx
@@ -193,10 +168,6 @@ pub fn request_prediction(
                 edits.into(),
                 None,
                 Some(editable_range),
-                EditPredictionInputs::V2(zeta_input),
-                None,
-                trigger,
-                response_received_at - buffer_snapshotted_at,
                 cx,
             )
             .await,

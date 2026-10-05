@@ -104,8 +104,10 @@ pub struct NodeBinarySettings {
     pub path: Option<String>,
     /// The path to the npm binary Zed should use (defaults to `.path/../npm`).
     pub npm_path: Option<String>,
-    /// If enabled, Zed will download its own copy of Node.
+    /// If enabled, Zed will not look for Node on PATH.
     pub ignore_system_version: bool,
+    /// Whether Zed may download its own copy of Node.
+    pub allow_binary_download: bool,
 }
 
 impl From<settings::NodeBinarySettings> for NodeBinarySettings {
@@ -114,7 +116,30 @@ impl From<settings::NodeBinarySettings> for NodeBinarySettings {
             path: settings.path,
             npm_path: settings.npm_path,
             ignore_system_version: settings.ignore_system_version.unwrap_or(false),
+            allow_binary_download: settings.allow_binary_download.unwrap_or(false),
         }
+    }
+}
+
+#[cfg(test)]
+mod node_binary_settings_tests {
+    use super::*;
+
+    #[test]
+    fn old_path_setting_does_not_allow_node_download() {
+        let legacy: settings::NodeBinarySettings =
+            serde_json::from_str(r#"{"ignore_system_version":true}"#)
+                .expect("parse legacy Node settings");
+        let resolved = NodeBinarySettings::from(legacy);
+        assert!(resolved.ignore_system_version);
+        assert!(!resolved.allow_binary_download);
+
+        let opted_in: settings::NodeBinarySettings =
+            serde_json::from_str(r#"{"allow_binary_download":true}"#)
+                .expect("parse Node download opt-in");
+        let resolved = NodeBinarySettings::from(opted_in);
+        assert!(!resolved.ignore_system_version);
+        assert!(resolved.allow_binary_download);
     }
 }
 
